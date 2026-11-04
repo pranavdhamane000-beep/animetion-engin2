@@ -1,0 +1,8 @@
+# Pinned compiler for reproducible builds (spec 5.1, 9.5 step 2).
+# 1.99.1 (58cf8f9c3 2026-10-13) is the host installed on the RTX 3050A reference
+# machine. Changing this channel is a locked-dependency change: regenerate
+# Cargo.lock, re-run the workspace test command, and revalidate G0 (spec 9.12).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]

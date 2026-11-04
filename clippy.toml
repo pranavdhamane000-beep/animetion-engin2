@@ -1,0 +1,48 @@
+# Lint baseline (spec 9.3). Thresholds are set once, here, and do not change
+# per-crate; a crate that needs an exception states it in its own source with a
+# reason rather than editing this file.
+
+# Matches rust-toolchain.toml. Clippy uses it to decide which suggestions are
+# applicable, so a mismatch silently changes the lint set.
+msrv = "1.99.1"
+
+# Spec 7.4 requires every typed error variant to carry safe context (asset id,
+# path, expected/actual revision, frame, tick, export stage), so error
+# constructors legitimately take many parameters.
+too-many-arguments-threshold = 10
+
+# Canonical hashing and codec work is branchy by nature (spec 9.7, 20.7).
+cognitive-complexity-threshold = 30
+
+# Readability ceiling for the generic-heavy canonical types.
+type-complexity-threshold = 250
+
+# Threshold above which `clippy::too_many_lines` fires; kept explicit so the
+# value does not drift with the toolchain default.
+too-many-lines-threshold = 200
+
+# `large_error_threshold` for `clippy::result_large_err`. Probe and library error
+# enums legitimately carry paths and adapter diagnostics.
+large-error-threshold = 256
+
+# `clippy::doc_markdown` (on, via `all = "deny"`) flags mixed-case words in prose
+# because they usually mean an item that should be backticked. `FFmpeg` is a proper
+# name that appears throughout this project's documentation and is never a path, so
+# it is declared valid rather than backticked at every mention.
+doc-valid-idents = ["FFmpeg"]
+
+# Determinism guards. Every path below is a real std item; clippy silently
+# ignores a typo'd path, so additions here are checked against std docs.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is not canonical; use BTreeMap or an ordered Vec (spec 7.1)" },
+    { path = "std::time::SystemTime", reason = "wall-clock time never enters deterministic state (spec 7.1)" },
+    { path = "std::time::Instant", reason = "timing belongs in informational diagnostics only" },
+    { path = "std::sync::Mutex", reason = "no lock order may influence canonical output; shared mutable state lives in anim_sim's owned step state (spec 6.3)" },
+    { path = "std::sync::RwLock", reason = "same as Mutex: ordering of concurrent access must not reach exported bytes (spec 6.3)" },
+]
+
+disallowed-methods = [
+    { path = "std::fs::rename", reason = "use anim_core's atomic replacement, which stays on one volume and leaves a backup (spec 7.3, 9.7)" },
+    { path = "std::fs::remove_file", reason = "never delete a destination before replacement is known possible (spec 6.3)" },
+    { path = "std::thread::sleep", reason = "canonical time is tick-driven; sleep may only appear in bounded wait loops of probes and preview (spec 6.3)" },
+]

@@ -1,0 +1,37 @@
+[package]
+name = "anim_test_support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anim_core = { path = "../anim_core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# WP00 probe binaries. Declared here because cargo auto-discovers src/bin/*.rs and
+# gives every binary this crate's dependency set; the probes are the only consumers.
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+bytemuck = { workspace = true }
+hex = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }
+ash = { workspace = true }
+sha2 = { workspace = true }
+symphonia = { workspace = true }
+rubato = { workspace = true }
+hound = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Target-gated: spec 5.1 requires the Win32 dependency stay behind a cfg so no
+# cross-platform API leaks into the portable crates.
+windows = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_replace",
+  "success": true,
+  "diagnostics": [
+    {
+      "code": "replace.staged",
+      "severity": "info",
+      "message": "destination, backup and temporary staged in D:\\qoder animation engine\\probe-out\\replace-scenario\\fault-before_commit (fault point before_commit)",
+      "context": {}
+    },
+    {
+      "code": "replace.same_volume",
+      "severity": "info",
+      "message": "destination and temporary share volume serial 0xfea2d1fe; rename will be a directory-entry swap rather than a copy",
+      "context": {}
+    },
+    {
+      "code": "replace.destination_state",
+      "severity": "info",
+      "message": "destination holds the complete old state (65536 bytes, blake3 0cb98c1a1b3b347a)",
+      "context": {}
+    },
+    {
+      "code": "replace.backup_state",
+      "severity": "info",
+      "message": "backup still holds the complete old state (65536 bytes), so recovery has a readable fallback regardless of where the fault landed",
+      "context": {}
+    },
+    {
+      "code": "replace.old_state_survived",
+      "severity": "info",
+      "message": "a fault before commit left the old bytes complete at the destination and the temporary still present, which is the required outcome",
+      "context": {}
+    }
+  ]
+}

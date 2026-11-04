@@ -1,0 +1,23 @@
+# Formatter baseline (spec 9.3). Every option here must be accepted by STABLE
+# rustfmt on the pinned 1.99.1 toolchain, because `cargo fmt --check` gates G0 and
+# requiring a nightly toolchain would break the reproducible-build rule (spec 5.1).
+#
+# Nightly-only options deliberately omitted - each one emits
+# "unstable features are only available in nightly channel" on stable, which makes
+# the gate output noisy and the effective style undefined:
+#   wrap_comments, format_strings, match_arm_blocks, force_multiline_blocks,
+#   trailing_comma, blank_lines_upper_bound, group_imports, imports_granularity.
+#
+# newline_style is NOT pinned: "Native" forces CRLF and then reports every LF file
+# as "Incorrect newline style", which fights git core.autocrlf. The rustfmt default
+# ("Auto", preserve existing) is the only setting that is stable under autocrlf
+# checkouts on Windows and LF checkouts elsewhere.
+
+edition = "2021"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+use_field_init_shorthand = true
+use_try_shorthand = true
+reorder_imports = true
+reorder_modules = true

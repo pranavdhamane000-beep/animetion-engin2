@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_adapter",
+  "success": false,
+  "diagnostics": [
+    {
+      "code": "adapter.vulkan_side",
+      "severity": "info",
+      "message": "Vulkan reports NVIDIA GeForce RTX 3050 A Laptop GPU (vendor 10de device 28a3) on attempt 1; deviceLUIDValid=true",
+      "context": {}
+    },
+    {
+      "code": "adapter.identity_forced_unavailable",
+      "severity": "warning",
+      "message": "--force-unavailable discarded the Vulkan LUID to exercise the IdentityUnavailable branch; this is a synthetic condition, not a limitation of this machine",
+      "context": {}
+    },
+    {
+      "code": "adapter.identity_unavailable",
+      "severity": "error",
+      "message": "Vulkan reported no valid deviceLUID for NVIDIA GeForce RTX 3050 A Laptop GPU, so no DXGI adapter can be matched to it. 3 DXGI adapter(s) were enumerable, but matching by name or taking the first would substitute an adapter the renderer did not choose (spec 9.7).",
+      "context": {}
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_export",
+  "success": true,
+  "diagnostics": [
+    {
+      "code": "export.capabilities_present",
+      "severity": "info",
+      "message": "9.0.2-essentials_build-www.gyan.dev declares ffv1, flac and pcm_s16le encoders",
+      "context": {}
+    },
+    {
+      "code": "export.audio_written",
+      "severity": "info",
+      "message": "reference WAV: 48000 frames x 2 channels at 48000 Hz, read back as 48000 frames",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffmpeg 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -nostdin -v error -y -f rawvideo -pix_fmt rgb24 -s 64x64 -framerate 25 -i - -i D:\\qoder animation engine\\probe-out/export-scenario\\audio.wav -map 0:v:0 -map 1:a:0 -c:v ffv1 -c:a flac -fflags +bitexact -map_metadata -1 -f matroska D:\\qoder animation engine\\probe-out/export-scenario\\full.mkv]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffmpeg"
+      }
+    },
+    {
+      "code": "export.encoded",
+      "severity": "info",
+      "message": "full: 122880 bytes of rawvideo fed, exit Some(0), output 44359 bytes, stderr ''",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -v error -print_format json -show_streams -count_frames D:\\qoder animation engine\\probe-out/export-scenario\\full.mkv]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "export.video_count_exact",
+      "severity": "info",
+      "message": "10 rawvideo frames in, 10 counted out of the ffv1 stream in matroska (-count_frames, not the container's absent nb_frames)",
+      "context": {}
+    },
+    {
+      "code": "export.audio_not_container_countable",
+      "severity": "warning",
+      "message": "audio stream flac counted 12 frames against a reference track of 48000, and reports duration absent; container frame counting is therefore NOT a usable audio check, and the export verifier must decode to PCM and compare sample counts",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffmpeg 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -nostdin -v error -y -i D:\\qoder animation engine\\probe-out/export-scenario\\full.mkv -vn -map 0:a:0 -c:a pcm_s16le -fflags +bitexact -map_metadata -1 D:\\qoder animation engine\\probe-out/export-scenario\\audio_roundtrip.wav]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffmpeg"
+      }
+    },
+    {
+      "code": "export.audio_pcm_roundtrip",
+      "severity": "info",
+      "message": "demuxing the audio out of the finished container and counting PCM frames gives 48000 against a reference of 48000; this is the verification path that works, not container frame counting",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffmpeg 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -nostdin -v error -y -f rawvideo -pix_fmt rgb24 -s 64x64 -framerate 25 -i - -i D:\\qoder animation engine\\probe-out/export-scenario\\audio.wav -map 0:v:0 -map 1:a:0 -c:v ffv1 -c:a flac -fflags +bitexact -map_metadata -1 -f matroska D:\\qoder animation engine\\probe-out/export-scenario\\truncated.mkv]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffmpeg"
+      }
+    },
+    {
+      "code": "export.encoded",
+      "severity": "info",
+      "message": "truncated: 73728 bytes of rawvideo fed, exit Some(0), output 33154 bytes, stderr ''",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -v error -print_format json -show_streams -count_frames D:\\qoder animation engine\\probe-out/export-scenario\\truncated.mkv]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "export.truncation_detected",
+      "severity": "info",
+      "message": "feeding 6 frames while the header advertised a 64x64 stream produced 6 counted frames, so a count check on the output is what distinguishes a short export from a complete one",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffmpeg 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -nostdin -v error -y -f rawvideo -pix_fmt rgb24 -s 64x64 -framerate 25 -i - -i D:\\qoder animation engine\\probe-out/export-scenario\\audio.wav -map 0:v:0 -map 1:a:0 -c:v ffv1 -c:a flac -fflags +bitexact -map_metadata -1 -f matroska D:\\qoder animation engine\\probe-out/export-scenario\\empty.mkv]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffmpeg"
+      }
+    },
+    {
+      "code": "export.encoded",
+      "severity": "info",
+      "message": "empty: 0 bytes of rawvideo fed, exit Some(0), output 15439 bytes, stderr ''",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -v error -print_format json -show_streams -count_frames D:\\qoder animation engine\\probe-out/export-scenario\\empty.mkv]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "export.empty_rejected",
+      "severity": "info",
+      "message": "a zero-byte feed yields a container whose video frame count is None rather than 10; a count check on the output rejects it even though FFmpeg exited successfully",
+      "context": {}
+    },
+    {
+      "code": "export.stream_order",
+      "severity": "info",
+      "message": "the verified output lists streams as 0=video, 1=audio; WP09 must address them by these indices rather than by scanning",
+      "context": {}
+    }
+  ]
+}

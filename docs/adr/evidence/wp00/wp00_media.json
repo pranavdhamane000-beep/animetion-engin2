@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_media",
+  "success": true,
+  "diagnostics": [
+    {
+      "code": "tool.digest_verified",
+      "severity": "info",
+      "message": "ffmpeg 9.0.2-essentials_build-www.gyan.dev matches the manifest digest",
+      "context": {
+        "role": "ffmpeg"
+      }
+    },
+    {
+      "code": "tool.digest_verified",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev matches the manifest digest",
+      "context": {
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(1); argv [-hide_banner -v error -print_format json -show_format -show_streams -probesize 32768 -analyzeduration 0 -select_streams 0 D:\\qoder animation engine\\tests/fixtures/media\\malformed_container.bin]",
+      "context": {
+        "process_exit": "1",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "media.failure_nonzero_exit",
+      "severity": "info",
+      "message": "non-media input produced exit Some(1) with stderr 'D:\\qoder animation engine\\tests/fixtures/media\\malformed_container.bin: Invalid data found when processing input'",
+      "context": {}
+    },
+    {
+      "code": "media.failure_parsable_but_empty",
+      "severity": "info",
+      "message": "stdout parsed as JSON with 0 stream entries despite the nonzero exit; treating this as missing-stream, not malformed-json",
+      "context": {}
+    },
+    {
+      "code": "media.failure_missing_stream",
+      "severity": "info",
+      "message": "selecting the requested stream index from that output fails as MissingStream, which is a distinct outcome from MalformedJson",
+      "context": {}
+    },
+    {
+      "code": "media.failure_timeout",
+      "severity": "info",
+      "message": "deadline of 400 ms terminated and reaped a still-running child after 423 ms: D:\\qoder animation engine\\tools/ffmpeg/ffmpeg.exe exceeded 400 ms",
+      "context": {}
+    },
+    {
+      "code": "media.failure_digest_mismatch",
+      "severity": "info",
+      "message": "requesting the ffmpeg role at the ffprobe path is refused before any process is spawned: ffmpeg: D:\\qoder animation engine\\tools/ffmpeg/ffprobe.exe is f0d36ecbbdd3bcfac3efa078c96c7271c2e68b3810595552ac3b7f17e9a65c52, manifest expects 3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -v error -print_format json -show_format -show_streams -probesize 32768 -analyzeduration 0 -select_streams 0 D:\\qoder animation engine\\tests/fixtures/media\\tone_44100_stereo_1s.wav]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "media.stream_selected",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.wav: stream index 0 is pcm_s16le at 44100 Hz, 2 channels, duration 1.000000",
+      "context": {
+        "fixture": "tone_44100_stereo_1s.wav"
+      }
+    },
+    {
+      "code": "media.container_frame_count",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.wav: FFprobe reports nb_frames as absent (not zero) for this container",
+      "context": {}
+    },
+    {
+      "code": "media.decoded_frames",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.wav: gapless decode yields 44100 frames, untrimmed yields 44100 (difference 0)",
+      "context": {}
+    },
+    {
+      "code": "media.decoder_delay_undeclared",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.wav: the track declares no delay or padding and the two decodes are identical, so trimming is unobservable for this codec rather than absent",
+      "context": {}
+    },
+    {
+      "code": "media.resampled_frames",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.wav: 44100 Hz -> 48000 Hz over 44100 frames yields 48001; exact ratio is 48000.0000 so the declared band is 48000..=48001",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -v error -print_format json -show_format -show_streams -probesize 32768 -analyzeduration 0 -select_streams 0 D:\\qoder animation engine\\tests/fixtures/media\\tone_44100_stereo_1s.flac]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "media.stream_selected",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.flac: stream index 0 is flac at 44100 Hz, 2 channels, duration 1.000000",
+      "context": {
+        "fixture": "tone_44100_stereo_1s.flac"
+      }
+    },
+    {
+      "code": "media.container_frame_count",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.flac: FFprobe reports nb_frames as absent (not zero) for this container",
+      "context": {}
+    },
+    {
+      "code": "media.decoded_frames",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.flac: gapless decode yields 44100 frames, untrimmed yields 44100 (difference 0)",
+      "context": {}
+    },
+    {
+      "code": "media.decoder_delay_undeclared",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.flac: the track declares no delay or padding and the two decodes are identical, so trimming is unobservable for this codec rather than absent",
+      "context": {}
+    },
+    {
+      "code": "media.resampled_frames",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.flac: 44100 Hz -> 48000 Hz over 44100 frames yields 48001; exact ratio is 48000.0000 so the declared band is 48000..=48001",
+      "context": {}
+    },
+    {
+      "code": "tool.run",
+      "severity": "info",
+      "message": "ffprobe 9.0.2-essentials_build-www.gyan.dev exited Some(0); argv [-hide_banner -v error -print_format json -show_format -show_streams -probesize 32768 -analyzeduration 0 -select_streams 0 D:\\qoder animation engine\\tests/fixtures/media\\tone_44100_stereo_1s.oga]",
+      "context": {
+        "process_exit": "0",
+        "role": "ffprobe"
+      }
+    },
+    {
+      "code": "media.stream_selected",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.oga: stream index 0 is vorbis at 44100 Hz, 2 channels, duration 1.000000",
+      "context": {
+        "fixture": "tone_44100_stereo_1s.oga"
+      }
+    },
+    {
+      "code": "media.container_frame_count",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.oga: FFprobe reports nb_frames as absent (not zero) for this container",
+      "context": {}
+    },
+    {
+      "code": "media.decoded_frames",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.oga: gapless decode yields 44100 frames, untrimmed yields 44736 (difference 636)",
+      "context": {}
+    },
+    {
+      "code": "media.decoder_delay_verified",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.oga: untrimmed minus gapless equals the declared delay 128 plus padding 508 exactly, so gapless trimming is predictable here",
+      "context": {}
+    },
+    {
+      "code": "media.resampled_frames",
+      "severity": "info",
+      "message": "tone_44100_stereo_1s.oga: 44100 Hz -> 48000 Hz over 44100 frames yields 48001; exact ratio is 48000.0000 so the declared band is 48000..=48001",
+      "context": {}
+    }
+  ]
+}

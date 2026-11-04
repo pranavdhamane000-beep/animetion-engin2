@@ -32,7 +32,17 @@ below (see DECISIONS.md #6 for how that happened).
 | FFmpeg | **Pinned.** `ffmpeg.exe` + `ffprobe.exe` 9.0.2 gyan essentials vendored into `tools/ffmpeg/`, SHA-256 recorded in `tools/ffmpeg/ffmpeg-manifest.json`, both verified to execute from there. Binaries are git-ignored operator inputs; the manifest is versioned. System copy on PATH remains untrusted and unused (spec 9.11) |
 | Rust (rustc, cargo, rustup) | **OK — installed 2026-11-04.** rustc/cargo 1.99.1, rustfmt 1.10.0-stable, clippy 0.1.99, host `x86_64-pc-windows-msvc`, `RUSTUP_HOME=D:\rustup`, `CARGO_HOME=D:\cargo`. Proven by building and running a real exe |
 | Vulkan-capable NVIDIA driver | OK — loader 1.4.341.0; `vulkaninfo` exit 0 enumerating both adapters. NVIDIA driver 617.14, Vulkan 1.4.351 |
-| RTX 3050A reference machine | OK — **RTX 3050 A Laptop GPU confirmed**, 4094 MiB, PCI bus 01:00.0, LUID `00cb5c07-00000000`. Plus Intel iGPU `VEN_8086 DEV_A7AB`, LUID `6b0f0100-00000000` |
+| RTX 3050A reference machine | OK — **RTX 3050 A Laptop GPU confirmed**, PCI bus 01:00.0, Vulkan vendor `0x10DE` device `0x28A3`. Plus Intel iGPU `VEN_8086 DEV_A7AB` |
+
+**Do not key any check on a LUID value.** The 2026-11-04 probe recorded NVIDIA
+`00cb5c07-00000000`; the 2026-11-05 WP00 adapter probe measured `0000000000011af8`
+on the same machine and the same driver. LUIDs change between enumerations, so spec
+9.12's "no passing on a different adapter/driver without revalidation" is keyed on
+adapter name, vendor/device id and driver version. See ADR-0002 consequence 2.
+
+**The driver has two spellings.** Vulkan's `driver_version` reads `617.56.0`; wgpu's
+`driver_info` and the Windows driver read `617.14`. Both are in the evidence files.
+Comparing only one produces a false mismatch.
 
 ### Build hazards found by the probe — both must be respected
 
@@ -54,9 +64,20 @@ below (see DECISIONS.md #6 for how that happened).
    (spec 9.7 forbids substituting the primary desktop adapter).
 
 Also: `deviceLUIDValid = true` on both adapters, so the spec's LUID correlation is
-satisfiable here. No Vulkan validation layers installed (only Steam/EOS overlays),
-so the readback probe runs unvalidated. No `VULKAN_SDK` — wgpu needs only the
-runtime loader. Single built-in panel 1920x1200 @144 Hz, DPI 120.
+satisfiable here — proven in ADR-0002. No Vulkan validation layers installed (only
+Steam/EOS overlays), so every probe result in `docs/adr/evidence/wp00/` is an
+**unvalidated** run: it proves the driver accepted the calls, not that the calls were
+conformant. ADR-0003 states this as a residual rather than a clean pass. No
+`VULKAN_SDK` — wgpu and ash need only the runtime loader, and `ash`'s `linked`
+feature must stay off because it would require `vulkan-1.lib` from that absent SDK.
+
+**Shell note for every future session:** `RUSTUP_HOME`/`CARGO_HOME` were persisted
+with `setx`, so a shell started before that — including this app's Git Bash — has no
+`cargo` on PATH. Prepend it: `export PATH="/d/cargo/bin:$PATH"`. Not a broken
+install, a stale environment block.
+
+Display: single built-in panel 1920x1200 @144 Hz, DPI 120 — relevant to WP10's
+preview surface and to any golden frame sized against the window.
 
 ### Pen input: removed from scope
 
@@ -79,7 +100,7 @@ definitions.
 
 | Stage | Packages | Status | Exit evidence |
 | --- | --- | --- | --- |
-| S1 Deterministic core | WP00–WP05 | not started | All platform probes pass, toolchain frozen, identical bytes from any seek point |
+| S1 Deterministic core | WP00–WP05 | in progress — **G0 passed 2026-11-05**, G1 next | All platform probes pass, toolchain frozen, identical bytes from any seek point |
 | S2 Output path | WP06–WP09 | not started | First deterministic MP4 with synced audio |
 | S3 Tool + hardening | WP10–WP11 | not started | Usable editor, benchmarks meeting locked thresholds |
 | S4 Character and cinema | WP12–WP17 | not started | Gates G10–G15 |
@@ -87,39 +108,22 @@ definitions.
 
 ## Current Work Package
 
-WP00 — Repository and Platform Risk Prototypes (spec 9), gate **G0**. Stage S1
-covers G0–G4: G0=WP00 · G1=WP01 · G2=WP02+WP03 · G3=WP04 · G4=WP05.
+**WP01 — Canonical Rational Time and Stable Identity** (spec 10), gate **G1**.
+Nothing is in flight. WP00 is validated; see Completed Work Packages.
 
-WP00–WP05 execute strictly sequentially — spec 6.1 and 6.2 permit no
-concurrency below WP06, and WP02/WP03 cannot even overlap with each other. See
-DECISIONS.md #7.
+WP00–WP05 execute strictly sequentially — spec 6.1 and 6.2 permit no concurrency
+below WP06, and WP02/WP03 cannot even overlap with each other. See DECISIONS.md #7.
+Stage S1 covers G0–G4: G0=WP00 ✅ · G1=WP01 · G2=WP02+WP03 · G3=WP04 · G4=WP05.
 
-Environment setup status, ahead of any code:
-
-| Step | State |
-| --- | --- |
-| C++ compiler and linker | **Already present** — VS Build Tools 2026, MSVC 14.50.35717. The planned 5–8 GB install was unnecessary |
-| rustup + `stable-x86_64-pc-windows-msvc`, `RUSTUP_HOME`/`CARGO_HOME` on D: | **Done** — rustc/cargo 1.99.1, build verified |
-| FFmpeg/FFprobe candidate binaries (spec 9.2) | **Done** — vendored and hash-pinned, see DECISIONS.md #10 |
-| Baseline commit | **Done** — `3d60b84` carries spec + state files; state corrections commit precedes WP00 |
-| Pen probe hardware | **Moot** — pen input removed from scope; G0 is now fully achievable here |
-
-**Shell note for every future session:** `RUSTUP_HOME`/`CARGO_HOME` were persisted with
-`setx`, so a shell started before that (including this app's Git Bash) has no `cargo` on
-PATH. Prepend it: `export PATH="/d/cargo/bin:$PATH"`. Not a broken install — a stale
-environment block.
-
-Workspace layout to scaffold is extracted verbatim from spec 4.1 and 9.3: 13 crates
-under `crates/` (`anim_core` … `anim_test_support`), plus `config/`, `schemas/`,
-`docs/adr/`, `docs/benchmarks/`, `tests/`, `benchmarks/`, `tools/ffmpeg/`,
-`packaging/windows/`, and **five** `wp00_*.rs` probe binaries in `anim_test_support`
-(`wp00_pen.rs` is cancelled — see Deviations).
-
-Blocked on: nothing. All spec 9.2 prerequisites are met on this machine.
+Before starting WP01: run the test command in DECISIONS.md, then read spec section 10
+and `docs/adr/ADR-0004` — which does not exist yet, because ADR-0004 (rational
+serialization and arithmetic limits) is WP01's own deliverable.
 
 ## Completed Work Packages
 
-No package validated yet.
+| WP | Gate | Status | Validated | Evidence | What later packages must know |
+| --- | --- | --- | --- | --- | --- |
+| WP00 Repository and Platform Risk Prototypes | **G0** | **validated** | 2026-11-05 | `docs/adr/ADR-0001`, `0002`, `0003`, `0006`, `0014`, `0015`; reports in `docs/adr/evidence/wp00/` | Locked toolchain rustc 1.99.1 MSVC. Vulkan compute readback works exactly on the RTX 3050 A; `Rgba16Float` attachable; `max_buffer_size` 1 TiB. Vulkan↔DXGI correlate by LUID — and **ordinal 0 is the iGPU here**, the discrete adapter enumerated at index 1. `MoveFileExW(REPLACE_EXISTING\|WRITE_THROUGH)` satisfies never-mixed-bytes; `ReplaceFileW` cannot, by its own documentation. FFmpeg pinned by SHA-256 and verified before spawn. **FFmpeg exits 0 on truncated video input, and audio frame counts are unreadable from the container (48 000 reads back as 12)** — so WP09 counts video from `-count_frames` on the output and audio from decoded PCM. 5 probes, not 6: `wp00_pen` cancelled. |
 
 ## Pending human approvals
 
@@ -134,25 +138,40 @@ Visual gates are batched; nothing is owed yet.
 
 ## Deviations from spec
 
-**These override the DOCX. Read this section before starting WP00 or WP10 — the
-spec still describes cancelled work, and an ADR addendum removing it is owed.**
+**These override the DOCX. The DOCX still describes cancelled work in five places,
+so read this table before starting WP00 or WP10.**
 
 | # | Spec sections | Deviation | Since |
 | --- | --- | --- | --- |
-| 1 | 9.3, 9.5 step 6, 9.12 (pen line), 19 (WP10 §19 ink), 4.2 (`ink.rs`) | **Pen/ink input cancelled.** Do not build `crates/anim_test_support/src/bin/wp00_pen.rs` or `crates/anim_editor/src/ink.rs`. G0 validation drops the "pressure changes during a physical pen test" requirement. Artwork is authored externally and imported through WP02. | 2026-11-04 |
-| 2 | 9.2, 5.1 (toolchain unspecified) | **MSVC ABI chosen** (`stable-x86_64-pc-windows-msvc`, rustc 1.99.1). The spec never names a toolchain, so this is ours to decide and needs a `docs/adr/` entry. | 2026-11-04 |
+| 1 | 9.3, 9.5 step 6, 9.12 (pen line), 19 (WP10 §19 ink), 4.2 (`ink.rs`) | **Pen/ink input cancelled.** Do not build `crates/anim_test_support/src/bin/wp00_pen.rs` or `crates/anim_editor/src/ink.rs`. G0 validation drops the "pressure changes during a physical pen test" requirement — deleted, not waived. Artwork is authored externally and imported through WP02. **Recorded as `docs/adr/ADR-0015-native-ink-routing-CANCELLED.md`, which closes the owed addendum.** | 2026-11-04 |
+| 2 | 9.2, 5.1 (toolchain unspecified) | **MSVC ABI chosen** (`stable-x86_64-pc-windows-msvc`, rustc 1.99.1). The spec never names a toolchain, so this is ours to decide. | 2026-11-04 |
+| 3 | 5.1 (dependency table) | **`ash 0.38`, `pollster 0.4` and `sha2 0.11.1` added** to the dependency baseline. Spec 9.7 needs `VkPhysicalDeviceIDProperties.deviceLUID` and wgpu 30 exposes no raw handle or LUID; the probes need an executor for wgpu's async entry points; spec 5.1 names SHA-256 for executable verification but its only hash crate is blake3. Spec 3.2 requires an ADR for a dependency exception — all three are recorded in `docs/adr/ADR-0001-rust-and-dependency-lock.md`. | 2026-11-05 |
+| 4 | 9.3 (`tests/wp00_smoke.rs`) | **Smoke test relocated** to `crates/anim_test_support/tests/wp00_smoke.rs`. A virtual workspace root does not compile a root `tests/` directory — verified, not assumed — so at the literal path the file would never run. Same name, owning crate. **Spec 4.1's `tests/integration/` and `tests/golden/` have the same problem; decide it in WP11 before writing integration tests.** DECISIONS.md #13. | 2026-11-05 |
+| 5 | 9.3 (file list) | **`crates/anim_test_support/src/probe_tools.rs` added** — shared external-process launch, bounded pipe drain, deadline with terminate-and-reap, and manifest digest verification. Duplicating it across the media and export probes means two chances to orphan a child. Stays inside the WP00-only crate. DECISIONS.md #12. | 2026-11-05 |
+| 6 | 9.2 ("stable Rust with rustfmt and Clippy") | **`clippy::pedantic` is not enabled**; `all` is denied and the determinism-relevant lints are denied by name. Enabling pedantic produced 131 non-defect diagnostics on WP00's first real code. DECISIONS.md #11 records the measurement and the residual. | 2026-11-05 |
 
-Rationale and rejected alternatives: DECISIONS.md #6, #8, #9.
+Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, and the ADRs.
 
 ## Risks and open questions
 
-1. Whether a D3D12/Vulkan render pipeline built without live visual feedback
-   converges through golden-frame hashing alone. WP00's readback probe is the
-   first evidence either way.
-2. Subtle determinism or identity bugs can pass their own tests and surface
-   much later disguised as a different package's failure.
-3. FFmpeg must be vendored and pinned; the system copy on PATH is not the
-   build input.
+1. Whether a Vulkan render pipeline built without live visual feedback converges
+   through golden-frame hashing alone. **Partly answered, 2026-11-05:** the compute
+   readback path returns exact integers on the real adapter, so the data path in and
+   out of the GPU is sound. Nothing yet exercises a *render pass* — no rasterization,
+   no blending, no attachment ordering — so the aesthetic risk that motivated this
+   question is still open and will be first tested by WP06's goldens.
+2. Subtle determinism or identity bugs can pass their own tests and surface much
+   later disguised as a different package's failure. Unchanged; WP01–WP05 are where
+   this is exposed.
+3. ~~FFmpeg must be vendored and pinned.~~ **Closed 2026-11-05** — see DECISIONS.md
+   #10 and `tools/ffmpeg/ffmpeg-manifest.json`.
+4. **New, from WP00:** every probe result on this machine is an *unvalidated* Vulkan
+   run, because no validation layer is installed. A driver-tolerated misuse would be
+   certified green here. Installing the Vulkan SDK would close it; it is not required
+   by spec 9.2, so it remains a stated residual rather than a blocker.
+5. **New, from WP00:** the dGPU enumeration order is not stable and LUIDs change
+   between runs. Any future automation that selects an adapter by ordinal, or gates
+   on a recorded LUID, will intermittently target the iGPU.
 
 ## Handover note
 

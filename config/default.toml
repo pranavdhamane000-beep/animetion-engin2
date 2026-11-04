@@ -1,0 +1,56 @@
+# Non-secret application defaults and the explicit external-tool path setting
+# (spec 9.3). Nothing here is a secret; nothing here is a discovered path.
+#
+# Spec 5.1 and 9.11: production export and every media probe MUST take an explicit
+# configured absolute path and MUST NOT invoke a shell or silently discover an
+# unverified executable. A missing or unreadable path below is a typed error, not a
+# reason to search PATH.
+
+[schema]
+version = 1
+
+[tooling.ffmpeg]
+# Vendored, git-ignored, and pinned by SHA-256 in tools/ffmpeg/ffmpeg-manifest.json.
+# A probe hashes the file at this path and compares it to the manifest before
+# spawning. Digest mismatch, missing file, or an absent capability is a failure.
+executable = "tools/ffmpeg/ffmpeg.exe"
+probe_executable = "tools/ffmpeg/ffprobe.exe"
+manifest = "tools/ffmpeg/ffmpeg-manifest.json"
+
+[tooling.ffmpeg.capabilities]
+# Deliberately NOT enabled. Spec 9.4: external processes are launched directly with
+# argument arrays, never through a shell. Any future code that reaches for
+# cmd.exe / powershell -c to satisfy this probe is wrong and the probe must fail.
+shell_launch = false
+
+[render]
+# Spec 9.6: GPU selection defaults to an explicitly configured adapter or a
+# validated selection rule; it never assumes the first adapter is the RTX.
+# null means "apply the validated selection rule", not "use adapter 0".
+adapter_ordinal = 0
+required_backend = "vulkan"
+# When false, an adapter whose identity cannot be correlated to DXGI is reported as
+# IdentityUnavailable rather than substituted for. Spec 9.7 forbids substituting
+# the primary desktop adapter on mismatch.
+allow_implicit_adapter = false
+
+[probe]
+# Machine-readable probe reports land here. Regenerated output is never a source
+# input (spec 4.1), which is why probe-out/ is git-ignored.
+output_directory = "probe-out"
+schema_version = 1
+
+[media.probe]
+# Spec 9.7: decode a BOUNDED duration. An unbounded decode on a long file is not a
+# probe, it is an accident.
+max_decode_seconds = 2.0
+target_sample_rate_hz = 48000
+ffprobe_probesize = 32768
+ffprobe_analyzeduration = 0
+process_timeout_ms = 30000
+
+[replace.probe]
+# Temporary files are created beside their destination so replacement stays on one
+# volume (spec 9.6). The probe must not be pointed at a different volume.
+temp_beside_destination = true
+require_same_volume = true

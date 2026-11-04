@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_gpu",
+  "success": true,
+  "diagnostics": [
+    {
+      "code": "gpu.selection",
+      "severity": "info",
+      "message": "validated rule (discrete NVIDIA) resolved on attempt 1 to NVIDIA GeForce RTX 3050 A Laptop GPU (vendor 10de device 28a3 pci 0000:01:00.0)",
+      "context": {}
+    },
+    {
+      "code": "gpu.rgba16f_attachment",
+      "severity": "info",
+      "message": "Rgba16Float RENDER_ATTACHMENT supported: true",
+      "context": {}
+    },
+    {
+      "code": "gpu.shader_validated",
+      "severity": "info",
+      "message": "naga accepted the WGSL entry points: [\"Compute\"]",
+      "context": {}
+    },
+    {
+      "code": "gpu.readback_verified",
+      "severity": "info",
+      "message": "8 u32 outputs matched in[] * 3 + 1 exactly on NVIDIA GeForce RTX 3050 A Laptop GPU",
+      "context": {}
+    },
+    {
+      "code": "gpu.report",
+      "severity": "info",
+      "message": "GpuProbeReport schema v1 recorded for G0 evidence",
+      "context": {}
+    },
+    {
+      "code": "gpu.fields",
+      "severity": "info",
+      "message": "GpuProbeReport { adapter: AdapterIdentity { name: \"NVIDIA GeForce RTX 3050 A Laptop GPU\", vendor_id: 4318, device_id: 10403, luid: None, device_pci_bus_id: Some(\"0000:01:00.0\"), driver: Some(\"NVIDIA\"), driver_info: Some(\"617.14\") }, backend: \"Vulkan\", driver: Some(\"NVIDIA / 617.14\"), max_buffer_size: 1099511627776, rgba16f_attachment: true, compute_readback_verified: true }",
+      "context": {
+        "compute_readback_verified": "true",
+        "max_buffer_size": "1099511627776"
+      }
+    }
+  ]
+}

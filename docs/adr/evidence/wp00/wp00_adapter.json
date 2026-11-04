@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_adapter",
+  "success": true,
+  "diagnostics": [
+    {
+      "code": "adapter.vulkan_side",
+      "severity": "info",
+      "message": "Vulkan reports NVIDIA GeForce RTX 3050 A Laptop GPU (vendor 10de device 28a3) on attempt 1; deviceLUIDValid=true",
+      "context": {}
+    },
+    {
+      "code": "adapter.correlated",
+      "severity": "info",
+      "message": "Vulkan NVIDIA GeForce RTX 3050 A Laptop GPU and DXGI adapter #1 NVIDIA GeForce RTX 3050 A Laptop GPU are the same silicon: luid 0000000000011af8, vendor 10de, device 28a3",
+      "context": {}
+    },
+    {
+      "code": "adapter.vulkan_versions",
+      "severity": "info",
+      "message": "api_version Some(\"1.4.351\"), driver_version Some(\"617.56.0\")",
+      "context": {
+        "luid": "0000000000011af8"
+      }
+    },
+    {
+      "code": "adapter.budget",
+      "severity": "info",
+      "message": "local budget 3308 MiB, current usage 0 MiB, available for reservation 1751 MiB, current reservation 0 MiB",
+      "context": {
+        "segment": "local"
+      }
+    },
+    {
+      "code": "adapter.budget",
+      "severity": "info",
+      "message": "non_local budget 7349 MiB, current usage 0 MiB, available for reservation 3802 MiB, current reservation 0 MiB",
+      "context": {
+        "segment": "non_local"
+      }
+    },
+    {
+      "code": "adapter.identity_recorded",
+      "severity": "info",
+      "message": "AdapterIdentity: AdapterIdentity { name: \"NVIDIA GeForce RTX 3050 A Laptop GPU\", vendor_id: 4318, device_id: 10403, luid: Some(\"0000000000011af8\"), device_pci_bus_id: None, driver: Some(\"617.56.0\"), driver_info: Some(\"1.4.351\") }",
+      "context": {
+        "luid": "0000000000011af8"
+      }
+    },
+    {
+      "code": "adapter.dedicated_memory",
+      "severity": "info",
+      "message": "DXGI dedicated video memory 3892 MiB, dedicated system 0 MiB, shared system 8005 MiB on the correlated adapter",
+      "context": {}
+    }
+  ]
+}

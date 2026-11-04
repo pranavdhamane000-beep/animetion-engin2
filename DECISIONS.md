@@ -280,14 +280,130 @@ question from "does our readback→pipe→encode→mux→decode path hold counts
 commit get their own commit before WP00 code lands, so a package commit contains only
 that package's work. This matches the precedent set by `3d60b84`.
 
+
+## 2026-11-05
+
+### #11 — WP00 — `clippy::pedantic` enabled, then removed the same day
+
+Enabled at the workspace level on the theory that a determinism-critical engine
+should hold itself to the strictest available lint set. Measured against the first
+real code in the workspace: **131 diagnostics**, whose substance was
+`similar_names` (`argv` beside `args`), `must_use_candidate` on accessors, and
+`missing_errors_doc` asking every function to restate the shared `ProbeError`
+taxonomy in rustdoc. Zero defects. Spec 9.2 requires "stable Rust with rustfmt and
+Clippy" and 9.5 step 2 requires warnings-as-errors; neither names a lint group.
+
+**Decision:** `all = "deny"` stays. `pedantic` is allowed, and the lints that express
+this project's *actual* risks are denied by name instead: `unwrap_used`,
+`expect_used`, `await_holding_lock`, plus `clippy.toml`'s disallowed types and
+methods (`HashMap`, `SystemTime`, `Instant`, `Mutex`, `RwLock`, `fs::rename`,
+`fs::remove_file`, `thread::sleep`).
+
+**Why:** a gate that produces 131 non-defects gets worked around rather than honoured,
+which loses the lints that matter. The `#[must_use]` attributes and `# Errors`
+sections that pedantic did ask for were kept anyway - they were worth writing, it was
+the volume that was wrong.
+
+**Residual:** pedantic would have caught real things in later packages
+(`arithmetic_side_effects` among them). If a defect class appears that pedantic covers
+and `all` does not, re-enable that single lint by name rather than the group.
+
+### #12 — WP00 — `probe_tools.rs`: a file spec 9.3 does not list
+
+9.3 names `probe.rs` for "structured probe reports and exit handling" and the five
+binaries. Two probes need identical external-process machinery - argument-array
+spawn, bounded stdout/stderr drain, deadline with terminate **and** reap - and
+duplicating it means two chances to get the reap wrong, which is the half that
+matters (spec 9.8: "child processes are released on every return path").
+
+**Decision:** a shared `crates/anim_test_support/src/probe_tools.rs`. It stays inside
+the WP00-only crate, so spec 9.10's "no production crate imports a WP00 binary"
+still holds and nothing portable gains a dependency on it.
+
+### #13 — WP00 — `tests/wp00_smoke.rs` relocated into the crate
+
+9.3 names the path `tests/wp00_smoke.rs`. This workspace root is a **virtual**
+manifest (members only, no `[package]`), and cargo does not compile a root `tests/`
+directory for a virtual workspace. Verified on this workspace rather than assumed:
+a file placed there produced `error: no test target named ...`.
+
+**Decision:** the file lives at `crates/anim_test_support/tests/wp00_smoke.rs`, same
+name, inside the crate that owns test support (spec 4.2). The alternative - making the
+root a package - would add a 14th phantom crate that 4.2 does not list, and the
+third alternative - leaving a file at `tests/` that never runs - produces a test that
+reports coverage while executing nothing.
+
+**Consequence for WP11:** spec 4.1's `tests/integration/` and `tests/golden/` have the
+same problem. Cross-crate integration tests need either a member crate that owns them
+or a root package. Decide once, in WP11, before writing integration tests.
+
+### #14 — WP00 — `config/default.toml` read by a line scanner, not a TOML parser
+
+The config file is required by 9.3 and its `[tooling.ffmpeg]` paths are the explicit
+external-tool setting 5.1 demands. Spec 5.1's dependency table lists `serde` and
+`serde_json` but **no TOML reader**, so reading the file properly would be a fourth
+dependency exception.
+
+**Decision:** the probes read exactly the two path keys they need with a line scanner
+over the one section, and `wp00_smoke.rs` asserts the shape (both keys present, both
+repo-relative, both resolve inside the workspace, and `shell_launch = false` stated).
+Spec 18.5 - "parse configuration and validate external-tool paths" - is WP09, where a
+typed config is genuinely needed; whether `toml = 1.2.0` joins the baseline is that
+package's decision and is not made silently here.
+
+### #15 — WP00 — G0 evidence placement
+
+9.5 step 10 requires machine-readable probe reports and benchmark-machine metadata to
+be recorded, and 8.2 requires release evidence to be retained, but 4.1 says probe
+output is not a source-of-truth input - which is why `probe-out/` is git-ignored.
+
+**Decision:** the five `wp00_*.json` reports plus `TOOLCHAIN.txt` are copied to
+`docs/adr/evidence/wp00/` and versioned, adjacent to the ADRs that cite them.
+Generated output stays unversioned; the specific reports that certify G0 become
+evidence, and the distinction is the one 8.2 draws between scratch and retained
+failure artifacts.
+
+### #16 — WP00 — G0 result summary
+
+All five probes pass on the reference machine and the three machine-checkable gates
+are green (`cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings`,
+`test --workspace --locked`, 17 tests). Numbers and the four ADRs are in
+`docs/adr/`. Two findings change later packages' designs and are recorded there
+rather than here: LUIDs are not stable across boots (ADR-0002 consequence 2), and
+FFmpeg exits 0 on truncated video input while audio frame counts cannot be read from
+the container at all (ADR-0014 facts 2 and 3).
+
 ---
 
 ## Test command
 
-Not yet defined — set once the workspace compiles. Expected shape from spec 9.12:
+Defined as of WP00, and this is what a resuming session must run (spec 9.12). From
+Git Bash, prepend the toolchain that `setx` persisted but a live shell does not have:
 
 ```
-cargo fmt --check
+export PATH="/d/cargo/bin:$PATH"
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 ```
+
+Then the five probes, which are the part of G0 that touches hardware and are not run
+by `cargo test` (a test suite that needs a discrete GPU cannot run in CI or on a
+machine whose dGPU is power-gated):
+
+```
+cargo run -p anim_test_support --bin wp00_gpu
+cargo run -p anim_test_support --bin wp00_adapter
+cargo run -p anim_test_support --bin wp00_adapter -- --force-unavailable   # expect exit 1
+cargo run -p anim_test_support --bin wp00_replace -- --fault before-commit
+cargo run -p anim_test_support --bin wp00_replace -- --fault after-commit
+cargo run -p anim_test_support --bin wp00_replace -- --fault none
+cargo run -p anim_test_support --bin wp00_media
+cargo run -p anim_test_support --bin wp00_export
+```
+
+Each writes `probe-out/<capability>.json` and exits nonzero on an unmet requirement
+(spec 9.6). The certified set from 2026-11-05 is copied to
+`docs/adr/evidence/wp00/`; `probe-out/` itself is git-ignored.
+
+`wp00_pen` is cancelled — see DECISIONS.md #8 and `ADR-0015-native-ink-routing-CANCELLED.md`.

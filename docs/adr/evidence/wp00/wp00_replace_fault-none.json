@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "capability": "wp00_replace",
+  "success": true,
+  "diagnostics": [
+    {
+      "code": "replace.staged",
+      "severity": "info",
+      "message": "destination, backup and temporary staged in D:\\qoder animation engine\\probe-out\\replace-scenario\\fault-none (fault point none)",
+      "context": {}
+    },
+    {
+      "code": "replace.same_volume",
+      "severity": "info",
+      "message": "destination and temporary share volume serial 0xfea2d1fe; rename will be a directory-entry swap rather than a copy",
+      "context": {}
+    },
+    {
+      "code": "replace.committed",
+      "severity": "info",
+      "message": "MoveFileExW with REPLACE_EXISTING|WRITE_THROUGH returned success",
+      "context": {}
+    },
+    {
+      "code": "replace.destination_state",
+      "severity": "info",
+      "message": "destination holds the complete new state (65536 bytes, blake3 230bff58ef1c3023)",
+      "context": {}
+    },
+    {
+      "code": "replace.backup_state",
+      "severity": "info",
+      "message": "backup still holds the complete old state (65536 bytes), so recovery has a readable fallback regardless of where the fault landed",
+      "context": {}
+    },
+    {
+      "code": "replace.temporary_consumed",
+      "severity": "info",
+      "message": "the temporary no longer exists after the rename, so a completed run leaves no partial artifact beside the destination",
+      "context": {}
+    }
+  ]
+}

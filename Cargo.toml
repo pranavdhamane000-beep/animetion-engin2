@@ -1,0 +1,175 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/anim_core",
+    "crates/anim_assets",
+    "crates/anim_project",
+    "crates/anim_commands",
+    "crates/anim_scene",
+    "crates/anim_sim",
+    "crates/anim_render",
+    "crates/anim_audio",
+    "crates/anim_export",
+    "crates/anim_editor",
+    "crates/anim_app",
+    "crates/anim_headless",
+    "crates/anim_test_support",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.99.1"
+publish = false
+
+# Dependency baseline (spec 5.1), selected during WP00 so that no later work
+# package begins with floating versions.
+#
+# Two pinning styles, deliberately:
+#   "=x.y.z"  for native-binding and API-drift crates, where a minor bump
+#             changes the surface this workspace is written against. Cargo.lock
+#             already freezes everything; the explicit pin additionally stops an
+#             accidental `cargo update -p wgpu` from silently retargeting the
+#             Vulkan, DXGI, encoder and resampler paths that WP00 proved.
+#   "x.y.z"   (caret) elsewhere, so a semver-compatible security fix can land
+#             without a manifest edit. Upgrades stay a deliberate change with
+#             locked tests and affected golden comparisons (spec 5.1).
+#
+# Declaring a dependency here does NOT put it in Cargo.lock: an entry no member
+# references is pruned from resolution. The entries for WP06-WP10 are the frozen
+# intent, not a build cost today.
+[workspace.dependencies]
+
+# --- Core data, errors, identity ---
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+# Executable/probe context only. Prohibited as a public library error type
+# (spec 5.1); enforced by the anim_core ADR, not by Cargo.
+anyhow = "1.0.104"
+# v5 only: v4 pulls rand and a random UUID is not a stable identity across
+# processes, which spec 6.3 forbids for canonical output.
+uuid = { version = "1.29.0", default-features = false, features = ["v5", "serde"] }
+
+# --- Exact arithmetic for canonical rational time ---
+num-bigint = { version = "0.5.1", features = ["serde"] }
+num-integer = "0.1.47"
+num-traits = "0.2.19"
+
+# --- Hashing and encoding ---
+blake3 = { version = "1.8.7", default-features = false, features = ["std"] }
+hex = "0.4.3"
+# Spec 5.1 assigns "verifies executable SHA-256" to the FFmpeg manifest, but its
+# only hash crate is blake3, which is not SHA-256. sha2 is the second dependency
+# exception (recorded in ADR-0001 alongside ash and pollster): blake3 stays the
+# internal content hash, and SHA-256 is used only where the spec names it for
+# external-tool integrity, because that is the digest an operator can reproduce
+# with any standard tool.
+sha2 = "0.11.1"
+
+# --- GPU (WP00-proven, WP06/WP07 consumers) ---
+# Vulkan only. No DX12/GL/Metal/WebGL backends: a second backend is a second
+# set of limits and format capabilities to prove, and spec 9.11 forbids silently
+# falling back to one. The "portability" feature is likewise OFF, because it
+# exists to let a non-conforming adapter through.
+# `spin-lock` is ON deliberately: a thread ID is not part of canonical state, so
+# the lock strategy must not be observable in output either.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+# wgpu::Adapter exposes no VkPhysicalDevice and no LUID, so the adapter-identity
+# probe needs raw Vulkan. Same version wgpu-hal 30.0.1 resolves to, so the
+# process binds one loader. Do NOT enable ash's "linked" feature: it needs
+# vulkan-1.lib from a Vulkan SDK this machine does not have.
+ash = { version = "=0.38.0", default-features = true }
+# enumerate_adapters and request_device are async in wgpu 30; the probes are
+# synchronous binaries.
+pollster = "0.4"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+half = { version = "2.7.1", features = ["bytemuck"] }
+glam = { version = "0.34.2", features = ["bytemuck", "scalar-math"] }
+
+# --- Win32 (target-gated; see [target.'cfg(windows)'.dependencies] in crates) ---
+# Feature set verified against the windows-0.62.2 source in the local registry
+# cache, not recalled. Two non-obvious points:
+#   Win32_Security is a HARD build requirement, not a convenience: CreateFileW's
+#   signature names Security::SECURITY_ATTRIBUTES, and the modules are
+#   #[cfg(feature)]-gated, so omitting it fails compilation of the replacement probe.
+#   Win32_Graphics_Dxgi_Common is NOT needed: DXGI_ADAPTER_DESC1,
+#   DXGI_QUERY_VIDEO_MEMORY_INFO, the memory-segment-group enums and
+#   DXGI_ERROR_NOT_FOUND all live in Win32::Graphics::Dxgi itself; Common holds
+#   only DXGI_FORMAT and mode-list structs.
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Graphics_Dxgi",
+] }
+
+# --- Audio (WP00 media probe, WP08 consumers) ---
+# Formats pinned, not "all": an enabled decoder is a decoder that can be reached
+# by an unexpected input stream.
+symphonia = { version = "=0.6.1", default-features = false, features = [
+    "wav",
+    "pcm",
+    "flac",
+    "ogg",
+    "vorbis",
+] }
+# Feature names unverified for the 5.x rewrite; defaults kept until WP08 pins
+# the resampler alongside its PCM goldens (spec 5.1).
+rubato = "=5.0.1"
+hound = "3.5.1"
+cpal = "0.18.2"
+ringbuf = "0.6.0"
+
+# --- Editor (WP10 consumers) ---
+winit = "0.30.13"
+egui = "0.37.0"
+egui-winit = "0.37.0"
+egui_dock = "0.21.1"
+
+# --- Diagnostics ---
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# --- Development only (spec 5.1: never a library dependency) ---
+proptest = "1.12.0"
+criterion = { version = "0.8.2", default-features = false, features = ["html_reports"] }
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# clippy::pedantic is NOT enabled. It was turned on for WP00 and removed the same
+# day: on the workspace's first real code it produced 131 diagnostics, and the
+# substance of them was `similar_names` (`argv` next to `args`), `must_use_candidate`
+# on accessors, and `missing_errors_doc` asking for per-function rustdoc that the
+# shared error taxonomy already carries. None of that is a defect, and the spec
+# mandates only "stable Rust with rustfmt and Clippy" (9.2) plus warnings-as-errors,
+# not a particular lint group. A gate that noisy gets worked around rather than
+# honoured, which is worse than a narrower gate that stays green.
+#
+# `all` (correctness, suspicious, perf, style, complexity) stays denied, and the
+# rules that express THIS project's actual risks are denied by name below. Those are
+# the ones a later session must not relax: a panic, a silent fallback, or a
+# wall-clock value reaching canonical output invalidates golden comparisons.
+pedantic = { level = "allow", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+await_holding_lock = "deny"
+
+# Spec 7.4 requires every typed error variant to carry safe context, and those
+# context unions are legitimately large. Widening the thresholds is the honest
+# fix; boxing every variant would distort the error types to satisfy a lint that
+# is measuring the wrong thing here.
+result_large_err = { level = "allow" }
+too_many_arguments = { level = "allow" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.dev]
+opt-level = 0
