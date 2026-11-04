@@ -29,7 +29,7 @@ below (see DECISIONS.md #6 for how that happened).
 | C++ compiler and linker | **OK — already installed.** VS Build Tools 2026 at `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`, MSVC 14.50.35717, `cl.exe` + `link.exe` + `vcvars64.bat` present. **No installation needed.** |
 | Windows SDK | OK — Kits\10, Lib/Include 10.0.26100.0, UCRT `libucrt.lib` and `um` headers present |
 | Git | OK — 2.54.0 |
-| FFmpeg | Present — 9.0.2 gyan essentials on PATH. Spec forbids depending on system FFmpeg; a pinned binary must be chosen before WP09 |
+| FFmpeg | **Pinned.** `ffmpeg.exe` + `ffprobe.exe` 9.0.2 gyan essentials vendored into `tools/ffmpeg/`, SHA-256 recorded in `tools/ffmpeg/ffmpeg-manifest.json`, both verified to execute from there. Binaries are git-ignored operator inputs; the manifest is versioned. System copy on PATH remains untrusted and unused (spec 9.11) |
 | Rust (rustc, cargo, rustup) | **OK — installed 2026-11-04.** rustc/cargo 1.99.1, rustfmt 1.10.0-stable, clippy 0.1.99, host `x86_64-pc-windows-msvc`, `RUSTUP_HOME=D:\rustup`, `CARGO_HOME=D:\cargo`. Proven by building and running a real exe |
 | Vulkan-capable NVIDIA driver | OK — loader 1.4.341.0; `vulkaninfo` exit 0 enumerating both adapters. NVIDIA driver 617.14, Vulkan 1.4.351 |
 | RTX 3050A reference machine | OK — **RTX 3050 A Laptop GPU confirmed**, 4094 MiB, PCI bus 01:00.0, LUID `00cb5c07-00000000`. Plus Intel iGPU `VEN_8086 DEV_A7AB`, LUID `6b0f0100-00000000` |
@@ -58,18 +58,19 @@ satisfiable here. No Vulkan validation layers installed (only Steam/EOS overlays
 so the readback probe runs unvalidated. No `VULKAN_SDK` — wgpu needs only the
 runtime loader. Single built-in panel 1920x1200 @144 Hz, DPI 120.
 
-### Prerequisite that CANNOT be met here
+### Pen input: removed from scope
 
-**No pen or touch digitizer exists on this machine.** Zero matches for
-pen/wacom/digitizer/stylus across all present PnP devices; only an ASUS Precision
-Touchpad and USB mouse. The WP00 native-pen probe (pressure, tilt, coalesced
-history, cancellation — spec 9.12 requires "pressure changes during a physical pen
-test") cannot pass, and spec 9.11 forbids a mouse-only substitute.
+No pen or touch digitizer exists on this machine (PnP enumeration found only an
+ASUS Precision Touchpad and a USB mouse). That originally blocked the WP00 pen
+probe, and on 2026-11-04 the response was to **remove pen input from the project
+entirely** rather than work around the hardware — spec analysis showed ink strokes
+have no consumer anywhere in the pipeline. See DECISIONS.md #8 and Deviations below.
 
-**Resolved 2026-11-04:** build the probe, validate the code path against synthetic
-`WM_POINTER*` packets, record G0 as *partial — pen unverified on this machine*, and
-close the gap when a tablet is available. Details and residual risk in DECISIONS.md
-#8. The synthetic test must never be reported as the physical one.
+**Consequence: G0 is now fully achievable on this machine.** Pen was the single
+prerequisite it could not meet.
+
+Also worth knowing before writing GPU probes: this is a hybrid-graphics Optimus
+laptop, so the discrete GPU may be power-gated at probe time (see hazard 2 above).
 
 ## Stage plan
 
@@ -99,16 +100,22 @@ Environment setup status, ahead of any code:
 | --- | --- |
 | C++ compiler and linker | **Already present** — VS Build Tools 2026, MSVC 14.50.35717. The planned 5–8 GB install was unnecessary |
 | rustup + `stable-x86_64-pc-windows-msvc`, `RUSTUP_HOME`/`CARGO_HOME` on D: | **Done** — rustc/cargo 1.99.1, build verified |
-| Baseline commit of the scaffold files | Not authorized yet |
-| Pen probe hardware | **Cannot pass** — no digitizer on this machine. Awaiting user decision |
+| FFmpeg/FFprobe candidate binaries (spec 9.2) | **Done** — vendored and hash-pinned, see DECISIONS.md #10 |
+| Baseline commit | **Done** — `3d60b84` carries spec + state files; state corrections commit precedes WP00 |
+| Pen probe hardware | **Moot** — pen input removed from scope; G0 is now fully achievable here |
 
-Workspace layout to scaffold is extracted verbatim from spec 4.1 and 9.3 into the
-conversation record: 13 crates under `crates/` (`anim_core` … `anim_test_support`),
-plus `config/`, `schemas/`, `docs/adr/`, `docs/benchmarks/`, `tests/`,
-`benchmarks/`, `tools/ffmpeg/`, `packaging/windows/`, and six `wp00_*.rs` probe
-binaries in `anim_test_support`.
+**Shell note for every future session:** `RUSTUP_HOME`/`CARGO_HOME` were persisted with
+`setx`, so a shell started before that (including this app's Git Bash) has no `cargo` on
+PATH. Prepend it: `export PATH="/d/cargo/bin:$PATH"`. Not a broken install — a stale
+environment block.
 
-Blocked on: toolchain installation, then the answer on the baseline commit.
+Workspace layout to scaffold is extracted verbatim from spec 4.1 and 9.3: 13 crates
+under `crates/` (`anim_core` … `anim_test_support`), plus `config/`, `schemas/`,
+`docs/adr/`, `docs/benchmarks/`, `tests/`, `benchmarks/`, `tools/ffmpeg/`,
+`packaging/windows/`, and **five** `wp00_*.rs` probe binaries in `anim_test_support`
+(`wp00_pen.rs` is cancelled — see Deviations).
+
+Blocked on: nothing. All spec 9.2 prerequisites are met on this machine.
 
 ## Completed Work Packages
 
@@ -127,7 +134,15 @@ Visual gates are batched; nothing is owed yet.
 
 ## Deviations from spec
 
-None recorded.
+**These override the DOCX. Read this section before starting WP00 or WP10 — the
+spec still describes cancelled work, and an ADR addendum removing it is owed.**
+
+| # | Spec sections | Deviation | Since |
+| --- | --- | --- | --- |
+| 1 | 9.3, 9.5 step 6, 9.12 (pen line), 19 (WP10 §19 ink), 4.2 (`ink.rs`) | **Pen/ink input cancelled.** Do not build `crates/anim_test_support/src/bin/wp00_pen.rs` or `crates/anim_editor/src/ink.rs`. G0 validation drops the "pressure changes during a physical pen test" requirement. Artwork is authored externally and imported through WP02. | 2026-11-04 |
+| 2 | 9.2, 5.1 (toolchain unspecified) | **MSVC ABI chosen** (`stable-x86_64-pc-windows-msvc`, rustc 1.99.1). The spec never names a toolchain, so this is ours to decide and needs a `docs/adr/` entry. | 2026-11-04 |
+
+Rationale and rejected alternatives: DECISIONS.md #6, #8, #9.
 
 ## Risks and open questions
 

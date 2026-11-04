@@ -5,6 +5,11 @@
 # Downloaded installers and one-off tooling binaries — not build inputs
 /.tools
 
+# Vendored FFmpeg executables: inputs to the media and export probes, pinned by
+# SHA-256 in tools/ffmpeg/ffmpeg-manifest.json. Too large for git; the operator
+# copies them in. The manifest itself IS versioned.
+/tools/ffmpeg/*.exe
+
 # Probe and export scratch (never commit generated artifacts as inputs)
 /probe-out
 /export-out

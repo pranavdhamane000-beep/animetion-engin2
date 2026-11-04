@@ -159,29 +159,59 @@ concurrent construction of coupled packages.
 G3=WP04 · G4=WP05. G0 cannot pass using reports from a different adapter or driver
 without revalidation (9.12).
 
-### #8 — WP00 — Pen probe built, hardware proof deferred
+### #8 — WP00/WP10 — Pen input removed from scope (supersedes the earlier deferral)
 
-This laptop has no pen or touch digitizer (verified by PnP enumeration: only an
-ASUS Precision Touchpad and USB mouse). Spec 9.12 requires pressure change during a
-physical pen test, and 9.11 forbids a mouse-only substitute, so G0 cannot fully
-pass here.
+This laptop has no pen or touch digitizer (PnP enumeration found only an ASUS
+Precision Touchpad and a USB mouse). An earlier entry in this section recorded a
+decision to build the probe and defer its hardware proof; that was made before
+checking whether anything consumes ink strokes at all. It does not, so the deferral
+was the wrong frame — the question was scope, not scheduling.
 
-**Decision (user-approved 2026-11-04):** write the `wp00_pen` probe and validate
-its code path against synthetic `WM_POINTER*` packets, then record G0 as *partial —
-pen unverified on this machine* in `BUILD_STATE.md`. Close the gap when a tablet is
-available. Do not let the synthetic test be reported as the physical one.
+**Gap analysis (searched the full v3.2 spec):** pen appears in exactly two places —
+the `wp00_pen.rs` platform probe and `anim_editor/src/ink.rs` in WP10 §19. WP10
+specifies *capture* only: `GetPointerPenInfo`, pressure normalised to `[0,1]`,
+coalesced history, frozen view transform at pointer-down, transient preview that
+"commits exactly once" as one undo entry. Nothing in the document gives a committed
+stroke a consumer. Terms for the artwork role are absent outright: `corrective` and
+`brush` have zero hits, `cleanup` appears only in transaction and resource contexts,
+`paint` only in a dope-sheet file path, `raster` only in CPU silhouette analysis.
 
-**Why:** nothing else in S1 waits on pen input, so blocking the whole stage on an
-absent device costs weeks for no safety gain, while deleting the probe would lose
-the WP10 dependency it feeds.
+Meanwhile the artwork path the engine actually uses is imported assets: WP02's
+content-addressed store feeds named poses and replacement cels ("Named poses and
+replacement cels occur at exact frames"), and WP14 generates smears procedurally
+("Stylized smear. Use driver velocity magnitude for stretch, clamped to max aspect").
+The spec also states Level 3 does not guarantee hand-drawn smears or original
+choreography — those are Level 4, and they arrive as cels.
 
-**Rejected:** dropping native pen support from scope — it contradicts spec 2.1 and
-weakens the editor deliberately, and that would need its own ADR.
+**Decision (user-approved 2026-11-04):** drop `wp00_pen.rs` and `anim_editor/src/
+ink.rs`. Artwork is authored externally in Krita or Clip Studio Paint and imported
+through WP02. This removes the digitizer prerequisite, the deferred-G0 caveat, and a
+portion of WP10.
 
-**Residual:** the pen code path ships unvalidated against real driver behaviour —
-coalesced history, tilt sign conventions and capture-loss timing are exactly the
-things synthetic packets can misrepresent. WP10 inherits this debt until the tablet
-arrives.
+**Why:** building a capture mechanism with no consumer spends two work packages to
+produce a feature nothing uses, and it keeps an unsatisfiable hardware requirement
+alive on a machine that cannot meet it.
+
+**Rejected:** strokes as timeline annotation — retains the digitizer debt for
+convenience the mouse already provides; strokes as renderable artwork — needs a whole
+paint module (rasterisation, layer blending, alpha, colour management, brush model)
+that the spec does not contain, and makes the tablet urgent rather than optional.
+
+**Consequences to carry:**
+1. Spec §9.3, §9.5 step 6, §9.12 and WP10 §19 now describe work we have deliberately
+   cancelled. **The DOCX is still authoritative and still contains them**, so this
+   entry and the Deviations section in `BUILD_STATE.md` are the only things standing
+   between a future session and rebuilding the pen probe. A spec addendum removing
+   them is owed; until it exists, read Deviations before starting WP00 or WP10.
+2. WP10 keeps everything else — scene editing, transport, export launch, preview
+   quality adaptation. Only ink is removed.
+3. G0 becomes fully achievable on this machine, since pen was the one prerequisite
+   it could not meet.
+4. Level 4 remains dependent on hand-drawn frames. This decision changes *where* they
+   are drawn, not whether they are needed.
+5. Level 3 gates still require "review annotations" as evidence (spec §45). Those are
+   producible with mouse, text and frame markers. If marking up clips by hand ever
+   feels slow, a pen tablet reopens this decision rather than reversing it.
 
 ### #9 — WP00 — Rust toolchain installed and proven
 
@@ -202,6 +232,53 @@ registry detection, not PATH. The residual is narrower: `cc`-crate build scripts
 hand-written shell commands that resolve a linker off PATH can still get the wrong
 binary, which is why a `build.cmd` wrapper is still worth having. Written down so the
 overstatement is not repeated by the next session that reads this.
+
+### #10 — WP00 — FFmpeg vendored into `tools/ffmpeg/` and pinned by SHA-256
+
+Supersedes the deferral in #3. Spec 9.2 requires candidate FFmpeg/FFprobe binaries to
+be available before WP00; this machine had exactly one candidate
+(`D:\ffmp\ffmpeg-9.0.2-essentials_build\bin\`), so "compare candidates" had nothing to
+compare. Chosen on 2026-11-04 (user-approved) to copy that build into `tools/ffmpeg/`
+rather than point the probes at the external folder.
+
+**What was actually done:** `ffmpeg.exe` and `ffprobe.exe` copied into `tools/ffmpeg/`,
+`ffplay.exe` deliberately left out. Both copies executed from the new location. Pinned
+digests:
+
+| Executable | SHA-256 | Version |
+| --- | --- | --- |
+| `tools/ffmpeg/ffmpeg.exe` | `3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec` | 9.0.2-essentials_build-www.gyan.dev |
+| `tools/ffmpeg/ffprobe.exe` | `f0d36ecbbdd3bcfac3efa078c96c7271c2e68b3810595552ac3b7f17e9a65c52` | 9.0.2-essentials_build-www.gyan.dev |
+
+Recorded in `tools/ffmpeg/ffmpeg-manifest.json` (versioned) together with the
+capability list read from the binary itself: `ffv1`, `libx264`, `libx264rgb`, `mpeg4`,
+`libx265`, `libvpx`, `libaom-av1`, `openjpeg` for video; `aac`, `pcm_s16le`, `libopus`,
+`libvorbis`, `libmp3lame` for audio. The build is `--enable-static`, so there are no
+DLLs to stage.
+
+The `.exe` files are git-ignored — 210 MB has no place in this repo's history — so the
+manifest is the versioned record and the binaries are an operator-supplied input. That
+asymmetry is deliberate and is stated in the manifest's `vendoring` field.
+
+**Why:** spec 9.11 forbids silently falling back to system FFmpeg, and an in-repo
+pinned copy with a recorded digest makes "which binary produced this probe report"
+answerable years later. BUILD_STATE risk #3 closes.
+
+**Rejected:** referencing the external path (works, but the probe breaks the moment
+that folder moves and the pin is not self-contained); downloading a different pinned
+build (needs network and a distributor decision, and essentials already contains every
+codec WP00 and WP09 discuss).
+
+**Encoder choice for the export probe:** `ffv1` over `libx264` for the raw-video
+round-trip. x264's default lookahead and B-frame decisions make an exact frame count a
+less direct proof of the pipeline; ffv1 is lossless, intra-frame, and in every FFmpeg
+build. If WP09 needs delivery codecs it tests libx264 explicitly, which is a different
+question from "does our readback→pipe→encode→mux→decode path hold counts".
+
+**Consequence for commit hygiene (agreed same exchange):** the working-tree edits to
+`BUILD_STATE.md`/`DECISIONS.md` that had been sitting uncommitted since the baseline
+commit get their own commit before WP00 code lands, so a package commit contains only
+that package's work. This matches the precedent set by `3d60b84`.
 
 ---
 
