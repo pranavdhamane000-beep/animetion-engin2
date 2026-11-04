@@ -1,0 +1,21 @@
+# Rust build output
+/target
+**/target
+
+# Downloaded installers and one-off tooling binaries — not build inputs
+/.tools
+
+# Probe and export scratch (never commit generated artifacts as inputs)
+/probe-out
+/export-out
+*.tmp
+
+# Editor and OS noise
+.vs
+.idea
+Thumbs.ini
+.DS_Store
+
+# Intentionally NOT ignored:
+#   Cargo.lock  — locked builds are a spec requirement
+#   golden baselines and test fixtures — they are inputs, not output
