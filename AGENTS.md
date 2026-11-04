@@ -6,6 +6,12 @@
 2. Read `DECISIONS.md` — constraints already settled; do not re-open them.
 3. Read the spec section for the package in hand. The spec is the `.docx` in
    this directory; its sections are cited as `spec 9.5`, `spec 33`, and so on.
+   A `.docx` is a zip of XML and is not directly readable, so extract it first:
+   `python tools/spec_dump.py "<the .docx>" .tools/spec_v32.txt` (stdlib only, no
+   pandoc). The generated `.txt` is git-ignored output — always regenerate it rather
+   than trusting a copy left by an earlier session. This step failed a fresh-session
+   resume test on 2026-11-05 because the script itself was unversioned; it is now at
+   `tools/spec_dump.py`.
 4. Run the test command recorded in `DECISIONS.md`. Trust a failing test and the
    committed code over any summary, including one you were just given.
 

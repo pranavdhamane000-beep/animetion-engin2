@@ -12,7 +12,8 @@ deviations table and a decision log entry.
 
 ## Problem
 
-Spec v3.2 routes pen input through two artifacts and one gate requirement:
+Spec v3.2 routes pen input through five places - two files, two procedure lines,
+one gate requirement:
 
 | Location | What it asks for |
 | --- | --- |
@@ -45,7 +46,7 @@ explicitly forbids the obvious workaround — substituting mouse-only input.
 The gap analysis is the whole argument, so it is recorded here rather than left in a
 log entry:
 
-- Pen appears in exactly the five locations above. Nothing else in v3.2 mentions it.
+- Pen appears in exactly the five locations tabulated above. Nothing else in v3.2 mentions it.
 - WP10 §19 specifies **capture only**. Nowhere in the document does a committed
   stroke receive a consumer.
 - The vocabulary a stroke-consumer would need is absent outright: `corrective` and

@@ -119,6 +119,24 @@ Before starting WP01: run the test command in DECISIONS.md, then read spec secti
 and `docs/adr/ADR-0004` — which does not exist yet, because ADR-0004 (rational
 serialization and arithmetic limits) is WP01's own deliverable.
 
+**What already exists, so you do not rediscover it by reading code.** A fresh-session
+resume test on 2026-11-05 had to open `crates/anim_core/src/lib.rs` and its
+`Cargo.toml` to work this out:
+
+- `anim_core` is the only production crate with content: `src/diagnostic.rs`
+  (`Diagnostic`, `DiagnosticCode`, `DiagnosticSeverity`, `DiagnosticContext`) plus the
+  `lib.rs` that exports it. Its sole dependency is `serde`. WP01 adds time and identity
+  modules beside it.
+- `uuid`, `num-bigint`, `num-integer`, `num-traits` and `blake3` are pinned in
+  `[workspace.dependencies]` but **referenced by no crate yet**, so they are not in
+  `Cargo.lock` — an unused `workspace.dependencies` entry is pruned from resolution.
+  WP01 is their first consumer; adding them to `anim_core` will grow the lock file,
+  which is expected, not drift.
+- The other ten crates are doc-comment stubs. `anim_app` and `anim_headless` are
+  `fn main() {}` stubs.
+- The spec `.docx` is versioned but unreadable directly: extract it with
+  `python tools/spec_dump.py "<docx>" .tools/spec_v32.txt` before reading a section.
+
 ## Completed Work Packages
 
 | WP | Gate | Status | Validated | Evidence | What later packages must know |

@@ -367,12 +367,58 @@ failure artifacts.
 
 All five probes pass on the reference machine and the three machine-checkable gates
 are green (`cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings`,
-`test --workspace --locked`, 17 tests). Numbers and the four ADRs are in
+`test --workspace --locked`, 17 tests). Numbers and the six ADRs are in
 `docs/adr/`. Two findings change later packages' designs and are recorded there
 rather than here: LUIDs are not stable across boots (ADR-0002 consequence 2), and
 FFmpeg exits 0 on truncated video input while audio frame counts cannot be read from
 the container at all (ADR-0014 facts 2 and 3).
 
+
+### #17 — Project — Resume protocol exercised against a fresh session, and it failed one step
+
+DECISIONS.md #5 recorded the continuity model as "designed, not proven" and owed a
+test: start a session with no context and confirm it resumes from disk alone. Run on
+2026-11-05, immediately after WP00's commit, by delegating the four protocol steps to
+an agent with no conversation history and instructing it to be skeptical rather than
+confirming.
+
+**What held:** steps 1, 2 and 4 worked verbatim. The named package (WP01/G1), the gate
+mapping, the must-not-do list, and the test command were all recoverable and true; the
+four commands were re-run by the fresh session and all exited 0 with 17 passing tests.
+The probe flags it read out of the source (`--force-unavailable`, the three fault
+names) matched the state files.
+
+**What failed — step 3, and it failed structurally, not cosmetically.** "Read the spec
+section" points at a `.docx`, which is a zip of XML and not directly readable. The
+extraction script and its output lived in `.tools/`, which `.gitignore` excludes, and
+neither file was mentioned in `AGENTS.md`, `BUILD_STATE.md`, `DECISIONS.md` or any ADR.
+On this machine the test passed only because a stale extraction happened to be present;
+on a fresh clone step 3 is unsatisfiable, so the entire continuity model was resting on
+an unversioned, undocumented artifact.
+
+**Fixes, all committed with this entry:**
+1. `tools/spec_dump.py` is now versioned (`tools/` is not ignored; only
+   `/tools/ffmpeg/*.exe` is). The generated `.txt` stays unversioned output and
+   `AGENTS.md` step 3 now says to regenerate rather than trust a leftover copy.
+2. `AGENTS.md` step 3 states the extraction command inline.
+3. `BUILD_STATE.md`'s resume point now lists what already exists in `crates/` — the
+   test had to open source files to learn that `anim_core` holds only `diagnostic.rs`,
+   and that `uuid`/`num-bigint`/`blake3` are pinned but referenced by no crate, so
+   their first `Cargo.lock` appearance in WP01 is expected rather than drift.
+4. Three factual errors found by the same review: `#16` said "four ADRs" (there are
+   six); `ADR-0015` said "two artifacts" in one place and "five locations" in another;
+   corrected to a consistent count.
+
+**Residual, not fixed:** `AGENTS.md:44-48` lists WP10, WP14-17 and WP18-22 as gates an
+agent may not self-certify, and **omits G1**. Whether WP01's gate is self-certifiable is
+therefore genuinely ambiguous on the text. It is not mine to settle — the list is a
+boundary the user drew. Ask before treating G1 as passed.
+
+**Why this test belongs in the protocol rather than in one conversation:** the model's
+whole claim is that a fresh session can resume from disk. A claim about fresh sessions
+cannot be verified by the session that wrote the files, because that session knows what
+it meant. Only a session without that context tests it. Re-run this after each stage
+boundary, not each package.
 ---
 
 ## Test command
