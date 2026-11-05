@@ -12,8 +12,11 @@
    than trusting a copy left by an earlier session. This step failed a fresh-session
    resume test on 2026-11-05 because the script itself was unversioned; it is now at
    `tools/spec_dump.py`.
-4. Run the test command recorded in `DECISIONS.md`. Trust a failing test and the
-   committed code over any summary, including one you were just given.
+4. Run the gate: `tools\ci.cmd` (spec 9.5 step 2, DECISIONS.md #19). It resolves cargo
+   itself, so it works from a shell that has no toolchain on PATH. Add `-WithProbes`
+   only when re-certifying the platform — after a driver update, a toolchain bump, or a
+   change to the pinned FFmpeg. Trust a failing gate and the committed code over any
+   summary, including one you were just given.
 
 A fresh session is expected to be able to complete any unbuilt package from
 those four steps alone, with no prior conversation. If it cannot, the state

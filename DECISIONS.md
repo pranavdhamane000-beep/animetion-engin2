@@ -495,12 +495,77 @@ reproducing. Same physics, opposite loudness, and the loudness is the whole argu
   (Intel driving the panel, NVIDIA reported phantom) is classic switching behaviour.
 - None of this is enforced by anything yet. It is a written constraint on packages that
   do not exist. WP06 owns turning it into code.
+
+### #19 — WP00 closeout — CI: what spec 9.5 step 2 could actually mean here
+
+Spec 9.5 step 2 says "…and enable warnings-as-errors in **CI**." WP00 was committed
+with that clause unmet, and G0 was reported as passed anyway. That was too generous of
+me: the exit text of G0 (8.3) is "all WP00 platform probes pass and exact versions are
+locked", which the local commands satisfied, but step 2 of the implementation sequence
+asked for more than I had delivered.
+
+**The finding that decides the shape:** `git remote -v` returns nothing and
+`@{u}` reports no upstream. There is no remote, so there is no hosted CI. A
+`.github/workflows/*.yml` file would be a declaration of coverage that never executes
+— the identical failure mode as the root `tests/` file in #13, which cargo does not
+compile. Writing one would have looked like closing the gap while making it worse,
+because now it would be documented as passing.
+
+**Decision:** the gate is a script that runs here — `tools/ci.ps1`, launched by
+`tools/ci.cmd`.
+
+- Default run: `fmt --check`, `clippy --all-targets -- -D warnings`, `test --workspace
+  --locked`. Measured 0.4s / 3–4s / 8–21s depending on cache state.
+- `-WithProbes` re-runs the eight probe scenarios, ~50s total.
+- It resolves `cargo` explicitly before use, because `RUSTUP_HOME`/`CARGO_HOME` were
+  set with `setx` and do not reach an already-running shell — the failure this session
+  hit twice, once in each direction.
+- The two scenarios that must FAIL are asserted on the inverted exit code
+  (`wp00_adapter --force-unavailable`). An expected-failure case that stops failing has
+  stopped testing anything, and without inversion it reports as a clean pass.
+
+**Verified that it can fail, not just that it passes.** I injected unformatted code
+into `anim_core/src/diagnostic.rs`: `fmt` reported exit 1, `clippy` exit 101, and the
+summary printed FAIL and exited nonzero. Then the file was restored from a copy and
+`git diff` came back empty. A gate that only ever prints PASS is worse than no gate,
+because it launders the doubt away.
+
+**Why the probes stay out of any future hosted runner:** spec 9.12 forbids G0 passing
+on reports from a different adapter or driver. Cloud Windows runners have different —
+usually no discrete — GPU. Probes belong on the reference machine; only fmt, clippy and
+test are hardware-independent. The script prints this warning after a probe run so the
+constraint travels with the tool rather than living only here.
+
+**Rejected:** GitHub Actions today (nothing pushes to it); a `build.cmd` calling
+`vcvars64.bat` on every run — DECISIONS #9 established that cargo builds fine without
+it, and adding an environment initialiser for a hypothetical C build script is a
+fallback for a failure that was measured and found absent. If a crate with a `cc`
+build script enters the graph and picks up the MSYS `link.exe`, that is the moment to
+revisit it.
+
+**Residual:** this is a *local* gate. If "CI" in the spec meant a hosted pipeline with
+enforcement, the gap is unmet and closing it needs a remote plus a decision about
+pushing this repository somewhere. Not mine to make.
+
+**Also unresolved, and unrelated to CI:** the Vulkan validation layer gap (spec 9.12's
+silent partner) still stands — every probe result here is an unvalidated run. Installing
+the SDK is the fix and is not required by 9.2.
+
 ---
 
 ## Test command
 
-Defined as of WP00, and this is what a resuming session must run (spec 9.12). From
-Git Bash, prepend the toolchain that `setx` persisted but a live shell does not have:
+**Use the gate. `tools\ci.cmd` is the single entry point** (DECISIONS.md #19) and it
+resolves cargo itself, so it works from a fresh shell:
+
+```
+tools\ci.cmd                 # fmt + clippy + test --locked
+tools\ci.cmd -WithProbes     # + the eight platform probe scenarios
+tools\ci.cmd -Only clippy    # one step while iterating
+```
+
+The equivalent raw commands, if you would rather run them by hand — from Git Bash,
+prepend the toolchain that `setx` persisted but a live shell does not have:
 
 ```
 export PATH="/d/cargo/bin:$PATH"
