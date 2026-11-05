@@ -5,11 +5,34 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 10.4 names this dependency set exactly, and states that anim_core has no
+# workspace-internal dependency: every other crate imports these types rather
+# than defining local seconds, timestamps or untyped IDs.
 [dependencies]
 serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+num-bigint = { workspace = true }
+num-integer = { workspace = true }
+num-traits = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+# The G1 property tests compute their own answers with arbitrary-precision
+# arithmetic and their own digests, so a test that agrees with the implementation
+# is not a test that agrees with the specification. These are dev-only: spec 5.1
+# keeps them out of the library graph, and they are already dependencies of this
+# crate for production reasons, so nothing new enters the build.
+num-bigint = { workspace = true }
+blake3 = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

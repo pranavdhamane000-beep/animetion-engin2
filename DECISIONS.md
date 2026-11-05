@@ -623,6 +623,151 @@ Hedging with "code complete" after a passing suite would be the same false modes
 that let an unmet clause look satisfied in #19 — understating a result is how a
 requirement quietly goes unverified.
 
+### #22 — WP01 — `FramePos::subframe` is private; the rule overrides the listing
+
+Spec 10.8 writes `pub struct FramePos { pub frame: i64, pub subframe: Rational }`
+and, two lines later, "Fields whose invariants require normalization are private."
+Spec 10.6 uses the same verb of this exact field: "a subframe **normalized** to
+[0,1). **Normalization** carries overflow into the frame." WP01's first draft read
+the closing rule as being about `Rational` only, on the grounds that 10.8 marks
+`subframe` `pub` and leaves `Rational`'s `num`/`den` unmarked — that the two
+markings were a deliberate contrast. That reading is rejected: the rule names the
+same thing 10.6 names, so it is not about `Rational` alone.
+
+**Decision.** `frame` stays `pub` — it needs no normalization, and since spec 10.6
+supports negative positions outright, every `i64` is legal, so reading or writing
+it cannot produce an invalid value. `subframe` is private, read through
+`FramePos::subframe()`, written only by `at_frame`, `new` (validating) and
+`normalized` (carrying). `Deserialize` for `FramePos` is hand-written so that
+persisted data passes the same gate: a derived impl could reach the private field,
+which is how `project.anim.json` would smuggle `{"frame":5,"subframe":"3/2"}` in
+from disk. `Serialize` stays derived, because it can only ever write a value that
+already holds the invariant.
+
+**Why the range is not cosmetic.** `(frame, subframe)` has to be a **unique** name
+for one instant. `FramePos` is a sort key in three places — snapshot caches keyed
+on `(scene_id, revision, FramePos)` (spec 7.2) and `(SceneId, Revision, FramePos)`
+(spec 13.8), and "Sort keys by FramePos" for track sampling (spec 30) — and
+because `clippy.toml` rules out `HashMap`, those are ordered maps keyed on the
+type's own `Ord`. `FramePos{5, 3/2}` and `FramePos{6, 1/2}` are the same instant:
+`time_of` returns an equal `Rational` for both, while `Eq` reports them different
+and lexicographic `Ord` ranks them by representation rather than by time. One
+timeline position, two cache keys, and a keyframe order that depends on how a
+number happened to be written. `time_properties` must assert collapse, ordering,
+time-equality and idempotence together.
+
+**Also settled, from the same sentence.** `subframe` is `[0,1)` and never `1`,
+because spec 13.6 makes a frame's end the next frame's start, so `1/1` must carry.
+And it stays non-negative for negative times: spec 10.7's floor rule exists
+precisely so a time just below a negative boundary gives frame `-2` with a
+*positive* remainder, not frame `-1` approached from below.
+
+**Residual.** Spec 25's definition of done wants every listed file to exist, and 10.8
+lists field names; both are unchanged — only one `pub` is dropped. If a later package
+wants to assign a subframe directly, it goes through a constructor and this entry
+is the reason it must.
+
+### #23 — WP01 — three rulings taken before coding
+
+Answered by the user 2026-11-05 and written down because each is a constraint on
+code in this package, and one of them contradicts the spec.
+
+1. **`anim_core::io` builds on ADR-0006's `MoveFileExW`, not on spec 12.7.**
+   The spec (line 749) prescribes `ReplaceFileW` with `lpBackupFileName`. ADR-0006
+   rejected it from that API's own documentation — `ERROR_UNABLE_TO_MOVE_REPLACEMENT`
+   leaves the destination path *absent*, which violates 9.7's requirement that a
+   fault before commit leave the old bytes readable at the destination — and
+   `wp00_replace` proved `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` with an
+   explicit `.bak` on this machine. WP01 implements the proven sequence. **This is
+   a stated deviation from spec 12.7, left for WP03 to reconcile** alongside
+   ADR-0006's own status line, "the recovery *policy* closes in WP03".
+2. **Typed IDs are derived, not random.** `uuid` is locked to
+   `default-features = false, features = ["v5", "serde"]` (ADR-0001) and no spec
+   text names a creation mechanism — 10.8 says only "generated once at creation".
+   So `id.rs` exposes `derive(namespace, name)` over `Uuid::new_v5` and provides no
+   random constructor. Verified rather than assumed: resolving the pinned `1.29.0`
+   pulled `sha1_smol` and no entropy source, so v5-only is executable as designed.
+   An earlier note in this session proposed `uuid = "1.10.0"`; that was wrong, the
+   existing workspace pin was already correct, and 10.4's dependency list is
+   unchanged.
+   **Consequence for WP10:** spec 43's "Paste assigns new IDs" needs a fresh ID with
+   no random source available, so it must derive from something the document owns
+   (source id plus transaction seed, or an equivalent). That is WP10's decision to
+   make, not a gap in WP01.
+3. **Temp files cannot use spec 12.7's `.<uuid>.tmp`.** With no random UUID
+   available, uniqueness comes from a `create_new` open attempt with a bounded
+   counter, giving `.project.anim.json.<seq>.tmp` beside the destination. Same
+   purpose — no two writers collide — deterministic, and no new dependency.
+
+### #24 — WP01 — two files spec 10.3 does not list, and no cfg gate
+
+1. **`crates/anim_core/src/io.rs` added.** Spec 10.3 lists
+   `src/io/atomic_replace.rs` and `src/io/windows.rs` but neither a `io/mod.rs` nor
+   an `io.rs`, and Rust needs one of them to declare the children. Chose the
+   `src/io.rs` + `src/io/` form because it adds no path to the list 10.3 fixes. The
+   same class of omission as deviation 4 (`tests/` needing an owning crate) and
+   deviation 5 (`probe_tools.rs`): the spec's file tables name responsibilities, not
+   module mechanics.
+2. **`io/windows.rs` is not `#[cfg(windows)]`-gated.** The workspace pins
+   `x86_64-pc-windows-msvc` and spec 2.1 names no other platform, so a cfg gate
+   would guard a build that never happens, and its `#[cfg(not(windows))]` branch
+   would have to be either a second unproven implementation or a silent fallback —
+   which spec 9.11 forbids. The Windows-only constraint lives in
+   `[target.'cfg(windows)'.dependencies]` in `Cargo.toml`, where it is one line
+   instead of two code paths.
+
+**Residual:** if a non-Windows target is ever added, `io/` needs a second
+implementation and this entry is the place that decision starts.
+
+### #25 — WP01 — G1 result summary
+
+G1 passed 2026-11-05, self-certified under DECISIONS.md #21. `tools\ci.cmd`: fmt,
+clippy `--all-targets -D warnings` and `test --workspace --locked` all green;
+`anim_core` carries 48 unit tests plus 28 in `tests/time_properties.rs`, against 17
+tests workspace-wide before this package. Probes were not re-run: the adapter,
+driver, toolchain and pinned FFmpeg are unchanged, so `-WithProbes` would re- certify
+hardware nobody moved.
+
+**Two defects, both found by the reference-arithmetic method rather than by review.**
+First, `tick_duration` computed `1/(num*N)` instead of `den/(num*N)` — `1/48000` where
+the answer is `1001/48000`, a 1001× error in every step size WP05 would take; its own
+first test asserted the wrong value and passed, which is why the test now checks the
+property (`step × fps × N == 1`) instead of a literal. Second, `to_i64` reported
+`TryFromBigIntError`'s message — "number too large to fit in target type" — so an
+overflow error carried no value, breaking spec 23's "offending value context"
+requirement exactly where it matters most.
+
+**One assertion that was wrong for arithmetic reasons, not code reasons:** I expected
+1001 frames to be one second at 24000/1001. It is not; frame 24 is 1.001 s, frame
+24000 is 1001 s, and no whole frame lands on exactly one second. Also recorded: my
+estimate that `i64::MAX/2` had a representable sample index was off by 1000×, and
+`long_timelines_do_not_accumulate_error` is what proved it — the sample axis runs out
+of width near frame 5.76e15 while the timeline itself is still fine.
+
+**Consequence for WP02–WP05:** these are the types. Nothing downstream may define a
+local seconds value, a `f64` time, a plain `u64` counter or an untyped id, because
+spec 10.4 says every other crate imports these rather than inventing equivalents, and
+the ones that need a narrower view (WP08's non-negative `SampleOffset`, spec 17.5, and
+WP03's `RevisionOverflow`, spec 12.11) wrap these rather than reimplement them.
+
+**Citation audit, same day.** Building this package surfaced that eleven of my
+`spec x.y` references pointed at the wrong section: `ReplaceFileW` cited as 12.5 step 5
+when it is **12.7**; the directory-flush rule as 18.4 when it is **12.11**; snapshot
+cache keys as 6.4 when they are **7.2**; little-endian float bits as 22.5 when they are
+**14.7**; `EventOccurrenceId` derivation as 15.4 when it is **13.7**; "sort keys by
+FramePos" as 26.6 when it is **30**; paste's new IDs as spec 50 when it is **43**;
+asset-store rename as 12.3 when it is **11.7**. All corrected across the source,
+ADR-0004 and the state files.
+
+**Why this is recorded rather than quietly fixed:** every citation in `BUILD_STATE.md`,
+`DECISIONS.md` and the ADRs is load-bearing for a session that has to extract the DOCX
+to check it, and a wrong section number is worse than a missing one — it sends the next
+reader to a paragraph that does not say that. **How to re-check:** after extracting the
+text, resolve the owning section with *both* heading levels, e.g.
+`awk -v t=749 '/^# /{s=$0} /^## /{ss=$0} NR==t{print s" / "ss; exit}' .tools/spec_v32.txt`.
+Tracking only `^## ` caused several of these errors, because top-level sections are `# `
+and some WP subsections ("Algorithms", "Prerequisites") are unnumbered.
+
 ---
 
 ## Test command

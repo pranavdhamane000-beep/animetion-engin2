@@ -100,7 +100,7 @@ definitions.
 
 | Stage | Packages | Status | Exit evidence |
 | --- | --- | --- | --- |
-| S1 Deterministic core | WP00–WP05 | in progress — **G0 passed 2026-11-05**, G1 next | All platform probes pass, toolchain frozen, identical bytes from any seek point |
+| S1 Deterministic core | WP00–WP05 | in progress — **G0 passed 2026-11-05, G1 passed 2026-11-05**, G2 next | All platform probes pass, toolchain frozen, identical bytes from any seek point |
 | S2 Output path | WP06–WP09 | not started | First deterministic MP4 with synced audio |
 | S3 Tool + hardening | WP10–WP11 | not started | Usable editor, benchmarks meeting locked thresholds |
 | S4 Character and cinema | WP12–WP17 | not started | Gates G10–G15 |
@@ -108,16 +108,35 @@ definitions.
 
 ## Current Work Package
 
-**WP01 — Canonical Rational Time and Stable Identity** (spec 10), gate **G1**.
-Nothing is in flight. WP00 is validated; see Completed Work Packages.
+**WP02 — Immutable Assets and Content Manifest** (spec 11). Gate **G2 is WP02+WP03
+together** (spec 8.3), so G2 cannot be claimed by WP02 alone. Nothing is in flight;
+WP00 and WP01 are validated — see Completed Work Packages.
 
 WP00–WP05 execute strictly sequentially — spec 6.1 and 6.2 permit no concurrency
 below WP06, and WP02/WP03 cannot even overlap with each other. See DECISIONS.md #7.
-Stage S1 covers G0–G4: G0=WP00 ✅ · G1=WP01 · G2=WP02+WP03 · G3=WP04 · G4=WP05.
+Stage S1 covers G0–G4: G0=WP00 ✅ · G1=WP01 ✅ · G2=WP02+WP03 · G3=WP04 · G4=WP05.
 
-Before starting WP01: run the test command in DECISIONS.md, then read spec section 10
-and `docs/adr/ADR-0004` — which does not exist yet, because ADR-0004 (rational
-serialization and arithmetic limits) is WP01's own deliverable.
+Before starting WP02: read spec section 11, then `docs/adr/ADR-0004`. That ADR is not
+background reading for WP02 — its Decision 4 (little-endian widths, `u64` length
+prefixes, canonical rational text, 16-byte UUIDs, domain tag first) **is** the
+specification WP02's manifest digest has to satisfy, and spec 11.7 asks for
+"length-prefixed canonical fields in order", which is the same contract. Then read
+`crates/anim_core/src/{rational,time,id,hash}.rs` before defining any asset type:
+spec 10.4 forbids a second time or identity model, so a WP02-local `u64` counter or
+`f64` timestamp is a defect on arrival.
+
+**ADR-0005 ("canonical project and manifest encoding") is open; the register closes it
+across WP01–WP03.** WP01 recorded the value-level encoding and deliberately did not
+decide document-level framing — record ordering, where the schema version lives, how
+manifest records are framed — because those questions have answers only once the
+records exist.
+
+**Do not rebuild what WP01 already proves.** `anim_core::io::atomic_replace` is the
+shared replacement API; spec 12.7 tells WP03 to use `ReplaceFileW`, ADR-0006
+and deviation row 7 say otherwise, and WP03 is where that reconciliation is written
+down. `wp00_replace` stays as G0 evidence and is not refactored to call the new API —
+spec 9.10's rule is that production crates do not import WP00 binaries, and the probe
+has already done its job.
 
 **Not for WP01, but do not lose it:** DECISIONS.md #18 records the settled adapter
 identity design — PCI bus id as the reference anchor, a `DedicatedVideoMemory` floor, a
@@ -130,15 +149,22 @@ or telemetry.** It is a written constraint on code that does not exist yet.
 resume test on 2026-11-05 had to open `crates/anim_core/src/lib.rs` and its
 `Cargo.toml` to work this out:
 
-- `anim_core` is the only production crate with content: `src/diagnostic.rs`
-  (`Diagnostic`, `DiagnosticCode`, `DiagnosticSeverity`, `DiagnosticContext`) plus the
-  `lib.rs` that exports it. Its sole dependency is `serde`. WP01 adds time and identity
-  modules beside it.
-- `uuid`, `num-bigint`, `num-integer`, `num-traits` and `blake3` are pinned in
-  `[workspace.dependencies]` but **referenced by no crate yet**, so they are not in
-  `Cargo.lock` — an unused `workspace.dependencies` entry is pruned from resolution.
-  WP01 is their first consumer; adding them to `anim_core` will grow the lock file,
-  which is expected, not drift.
+- `anim_core` is the only production crate with content: `lib.rs`, `diagnostic.rs`
+  (WP00) and `rational.rs`, `time.rs`, `id.rs`, `hash.rs`, `error.rs`, `io.rs`,
+  `io/atomic_replace.rs`, `io/windows.rs` (WP01), plus
+  `tests/time_properties.rs`. It depends on `serde`, `thiserror`, `uuid`,
+  `num-bigint`, `num-integer`, `num-traits`, `blake3`, `hex` and target-gated
+  `windows` — spec 10.4's set, exactly — and on **no workspace crate**, which is what
+  lets every other crate import these types instead of defining their own.
+  `proptest`, `tempfile`, `serde_json`, and a dev-only copy of `num-bigint`, `blake3`
+  and `uuid` are dev-dependencies only; G1's tests compute their own references so the
+  oracle is never the code under test.
+- `uuid`, `num-bigint`, `num-integer`, `num-traits` and `blake3` were pinned in
+  `[workspace.dependencies]` by WP00 but referenced by no crate, so they were absent
+  from `Cargo.lock` — an unused `workspace.dependencies` entry is pruned from
+  resolution. WP01 is their first consumer and `Cargo.lock` has grown accordingly,
+  which was expected, not drift. `proptest` and `tempfile` are now used as
+  dev-dependencies only (spec 5.1 keeps them out of library graphs).
 - The other ten crates are doc-comment stubs. `anim_app` and `anim_headless` are
   `fn main() {}` stubs.
 - The spec `.docx` is versioned but unreadable directly: extract it with
@@ -149,6 +175,7 @@ resume test on 2026-11-05 had to open `crates/anim_core/src/lib.rs` and its
 | WP | Gate | Status | Validated | Evidence | What later packages must know |
 | --- | --- | --- | --- | --- | --- |
 | WP00 Repository and Platform Risk Prototypes | **G0** | **validated** | 2026-11-05, CI gate added same day | `docs/adr/ADR-0001`, `0002`, `0003`, `0006`, `0014`, `0015`; reports in `docs/adr/evidence/wp00/`; gate at `tools/ci.ps1` | Locked toolchain rustc 1.99.1 MSVC. Vulkan compute readback works exactly on the RTX 3050 A; `Rgba16Float` attachable; `max_buffer_size` 1 TiB. Vulkan↔DXGI correlate by LUID — and **ordinal 0 is the iGPU here**, the discrete adapter enumerated at index 1. `MoveFileExW(REPLACE_EXISTING\|WRITE_THROUGH)` satisfies never-mixed-bytes; `ReplaceFileW` cannot, by its own documentation. FFmpeg pinned by SHA-256 and verified before spawn. **FFmpeg exits 0 on truncated video input, and audio frame counts are unreadable from the container (48 000 reads back as 12)** — so WP09 counts video from `-count_frames` on the output and audio from decoded PCM. 5 probes, not 6: `wp00_pen` cancelled. |
+| WP01 Canonical Rational Time and Stable Identity | **G1** | **validated** | 2026-11-05, gate green same day | `docs/adr/ADR-0004`; `crates/anim_core/src/{rational,time,id,hash,error}.rs`; `crates/anim_core/src/io/{atomic_replace,windows}.rs`; `crates/anim_core/tests/time_properties.rs` (28 tests) plus 48 unit tests | `Rational` persists as one string `"num/den"` — reduced, positive denominator, zero is `0/1` — and **parsing refuses a non-canonical spelling**, so no downstream loader may "normalize on read". Arithmetic runs in `BigInt` and reduces **before** the `i128` width check. `FramePos::subframe` is **private** with a hand-written `Deserialize`, because `(frame, subframe)` is a snapshot cache key and a map sort key: `5 + 3/2` and `6 + 1/2` are one instant, and letting both exist splits the key (DECISIONS.md #22). Floor, not truncation, so a negative exact boundary selects the preceding frame. Typed IDs are **v5-derived — there is no entropy source anywhere in the graph** — and their order is over the 16 bytes, implemented locally rather than inherited from `Uuid`, which is caret-pinned. Canonical bytes: little-endian widths, `u64` length prefixes, domain tag first; that layout is what spec 11.7's "length-prefixed canonical fields in order" will consume. `anim_core::io::atomic_replace::write_atomic` is the shared replacement API on ADR-0006's sequence, and **deviation row 7 is a live instruction for WP03**. The sample index overflows near frame 5.76e15 while the frame number does not, so clipping is a boundary decision for WP08/WP09, not a type decision here. |
 
 ## Pending human approvals
 
@@ -174,8 +201,10 @@ so read this table before starting WP00 or WP10.**
 | 4 | 9.3 (`tests/wp00_smoke.rs`) | **Smoke test relocated** to `crates/anim_test_support/tests/wp00_smoke.rs`. A virtual workspace root does not compile a root `tests/` directory — verified, not assumed — so at the literal path the file would never run. Same name, owning crate. **Spec 4.1's `tests/integration/` and `tests/golden/` have the same problem; decide it in WP11 before writing integration tests.** DECISIONS.md #13. | 2026-11-05 |
 | 5 | 9.3 (file list) | **`crates/anim_test_support/src/probe_tools.rs` added** — shared external-process launch, bounded pipe drain, deadline with terminate-and-reap, and manifest digest verification. Duplicating it across the media and export probes means two chances to orphan a child. Stays inside the WP00-only crate. DECISIONS.md #12. | 2026-11-05 |
 | 6 | 9.2 ("stable Rust with rustfmt and Clippy") | **`clippy::pedantic` is not enabled**; `all` is denied and the determinism-relevant lints are denied by name. Enabling pedantic produced 131 non-defect diagnostics on WP00's first real code. DECISIONS.md #11 records the measurement and the residual. | 2026-11-05 |
+| 7 | 12.7 (`ReplaceFileW` and `project.anim.json.<uuid>.tmp`) | **Atomic replacement uses `MoveFileExW(REPLACE_EXISTING \| WRITE_THROUGH)` with an explicit `.bak` written by us, not `ReplaceFileW`; temp files use a `create_new` counter sequence, not a UUID.** ADR-0006 rejected `ReplaceFileW` from that API's own documentation — `ERROR_UNABLE_TO_MOVE_REPLACEMENT` leaves the destination path absent — and `wp00_replace` proved the alternative on this machine. The UUID temp name is unsatisfiable because `uuid` is v5-only, with no entropy source. DECISIONS.md #23. **WP03 must read this row before writing `save_atomic`.** | 2026-11-05 |
+| 8 | 10.3 (file list) | **`crates/anim_core/src/io.rs` added** — the module declaration file for `io/atomic_replace.rs` and `io/windows.rs`, which 10.3 lists without either `io.rs` or `io/mod.rs`. Chose `src/io.rs` so the added path is the one Rust requires rather than two. Also: `io/windows.rs` is **not** `#[cfg(windows)]`-gated, because the workspace pins one platform and a not-Windows branch would be either a second unproven implementation or the silent fallback spec 9.11 forbids. DECISIONS.md #24. | 2026-11-05 |
 
-Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, and the ADRs.
+Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, #22, #23, #24, #25, and the ADRs.
 
 ## Risks and open questions
 
@@ -186,8 +215,12 @@ Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, an
    no blending, no attachment ordering — so the aesthetic risk that motivated this
    question is still open and will be first tested by WP06's goldens.
 2. Subtle determinism or identity bugs can pass their own tests and surface much
-   later disguised as a different package's failure. Unchanged; WP01–WP05 are where
-   this is exposed.
+   later disguised as a different package's failure. **Partly answered by WP01,
+   2026-11-05:** `tests/time_properties.rs` computes every expected value from
+   hand-written `BigInt` arithmetic in the test file itself, and that method found two
+   defects review had missed — a 1001× error in `tick_duration` and an overflow message
+   that carried no value. The exposure is now WP02–WP05, where the same rule applies:
+   an oracle that calls the code under test proves only self-consistency.
 3. ~~FFmpeg must be vendored and pinned.~~ **Closed 2026-11-05** — see DECISIONS.md
    #10 and `tools/ffmpeg/ffmpeg-manifest.json`.
 4. **New, from WP00:** every probe result on this machine is an *unvalidated* Vulkan
@@ -210,6 +243,21 @@ Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, an
 8. **Nothing in DECISIONS.md #18 is enforced by code.** The adapter-identity rules
    (PCI anchor, dedicated-VRAM floor, startup assertion) are constraints on packages
    that do not exist yet. WP06 must read #18; if it doesn't, no test will notice.
+9. **`write_atomic` reads the payload back in full, twice** — once to prove the
+   staged temporary is durable, once to prove the destination is the new state and not
+   a blend. For `project.anim.json` that is noise. For WP09's export it is a
+   multi-gigabyte read on every publication, and the code says so at the call site:
+   WP09 should hash-compare rather than byte-compare, and must not drop the check
+   entirely, because "never mixed bytes" is what the destination verification is
+   for. DECISIONS.md #25.
+10. **Directory-entry durability is asserted, not pinned.**
+    `io::atomic_replace` reports `DirectoryFlush::{Flushed, Unsupported}` and
+    `durability_warning()` surfaces the difference, but the test accepts either
+    outcome, because which one NTFS returns here was never measured. So the claim
+    "the rename is durable in the directory entry" is not certified by any test on
+    this machine — the file bytes and the rename are. Spec 18.4 asks only that the
+    limitation be visible rather than silent, which it is; a WP11 fault-injection run
+    on real hardware is what would settle which branch this machine takes.
 
 ## Handover note
 
