@@ -119,6 +119,13 @@ Before starting WP01: run the test command in DECISIONS.md, then read spec secti
 and `docs/adr/ADR-0004` — which does not exist yet, because ADR-0004 (rational
 serialization and arithmetic limits) is WP01's own deliverable.
 
+**Not for WP01, but do not lose it:** DECISIONS.md #18 records the settled adapter
+identity design — PCI bus id as the reference anchor, a `DedicatedVideoMemory` floor, a
+startup assertion instead of a bare user reminder, LUID kept only for WP07 budget
+attribution, and `power_preference: HighPerformance` rejected as a sole rule because it
+degrades silently to the iGPU. **WP06 and WP07 must read it before designing selection
+or telemetry.** It is a written constraint on code that does not exist yet.
+
 **What already exists, so you do not rediscover it by reading code.** A fresh-session
 resume test on 2026-11-05 had to open `crates/anim_core/src/lib.rs` and its
 `Cargo.toml` to work this out:

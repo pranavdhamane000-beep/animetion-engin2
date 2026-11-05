@@ -82,12 +82,15 @@ because both real adapters here report valid LUIDs.
 1. **Ordinal 0 is the wrong default on this machine.** Correlation landed on DXGI
    index 1. Anything later that assumes "first adapter" is wrong, including any
    script that picks an adapter to run a golden capture on.
-2. **LUID is not stable across boots.** `BUILD_STATE.md` recorded `00cb5c07-00000000`
-   from a probe earlier the same day; this run reports `0000000000011af8`. Spec 9.12's
-   "G0 cannot pass using reports from a different adapter/driver without
-   revalidation" must therefore be keyed on adapter name, vendor/device id and driver
-   version — **not** on LUID. A comparison written against the LUID would reject a
-   legitimate rerun on identical hardware.
+2. **LUID is not stable across enumerations, so nothing may key on its value.**
+   `BUILD_STATE.md` recorded NVIDIA `00cb5c07-00000000` from a 2026-11-04 probe; this
+   run measured `0000000000011af8` on the same machine and the same driver, with no
+   reboot between. Spec 9.12's "G0 cannot pass using reports from a different
+   adapter/driver without revalidation" is therefore keyed on **PCI bus id
+   (`0000:01:00.0`), adapter name, and driver version** — the three that held steady —
+   and not on the LUID. A comparison written against the LUID would reject a legitimate
+   rerun on identical hardware. See DECISIONS.md #18 for the full split between what
+   LUID proves and what it cannot.
 3. **The driver has two spellings.** Vulkan reports `617.56.0`; wgpu's `driver_info`
    and the Windows driver report `617.14`. Both are recorded. A revalidation check
    that compares only one will report a mismatch where there is none.

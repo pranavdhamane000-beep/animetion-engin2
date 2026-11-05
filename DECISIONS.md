@@ -419,6 +419,82 @@ whole claim is that a fresh session can resume from disk. A claim about fresh se
 cannot be verified by the session that wrote the files, because that session knows what
 it meant. Only a session without that context tests it. Re-run this after each stage
 boundary, not each package.
+
+### #18 — WP06/WP07 design input — adapter identity: what to check, what not to build
+
+Settled during the WP00 closeout discussion, before any render code exists, so WP06
+does not have to re-litigate it. Nothing here is built; it constrains how WP06, WP07
+and WP10 implement.
+
+**Three separate questions, which is why one check is not enough:**
+
+| Question | Mechanism | Cost |
+| --- | --- | --- |
+| "Are Vulkan and DXGI naming the same silicon?" | LUID compare (WP00 proved it: both `0000000000011af8`) | one-time, needs a second `VkInstance` |
+| "Is that the card we want to be on?" | PCI bus id + adapter name + driver vs the recorded G0 evidence | free — already on `AdapterInfo` |
+| "Is this even the right class of device?" | `DedicatedVideoMemory` floor | free — already read by `GetDesc1` |
+
+A LUID match passes on the iGPU if the OS handed the app the iGPU, because both APIs
+then agree on the wrong card. So correlation is a *consistency* check and must not be
+mistaken for a correctness check. PCI bus id supplies the correctness half for the
+reference machine; `device_type` + vendor `0x10DE` supplies it portably.
+
+**Decisions:**
+
+1. **G0/WP06 revalidation keys on PCI bus id + adapter name + driver version, not on
+   LUID.** Measured: LUID moved between two runs on the same machine and driver
+   (`00cb5c07` in the 2026-11-04 probe, `0000000000011af8` on 2026-11-05), while PCI sat
+   at `0000:01:00.0` both times, matching the board fact in BUILD_STATE. ADR-0002
+   consequence 2 is amended to say this.
+2. **A `DedicatedVideoMemory` floor is a required guard, not an optional one.** 3892 MiB
+   here. Borrowed deliberately from how shipped games handle hybrid laptops: they check
+   *capacity* ("requires 4 GB VRAM") rather than identity, because an integrated adapter
+   reports near-zero dedicated memory and that single fact catches the wrong-GPU case
+   with no identity logic at all. Costs nothing since we already call `GetDesc1`.
+3. **Startup assertion in WP10, not a user reminder.** The proposal was to print a
+   message at launch telling the operator to select the dGPU. Kept, but grounded: read
+   the selected adapter once, compare name + driver + PCI to the committed evidence, and
+   on mismatch print exactly that instruction. A reminder depends on a setting the engine
+   cannot see; this version still tells the human what to do, but only after checking.
+   The Windows per-app graphics preference is per-user, invisible to the process, and
+   silently reverted by driver updates.
+4. **LUID correlation stays, but only for WP07 budget attribution, once per process,
+   gated on `dxgi-telemetry`.** Never per frame. `QueryVideoMemoryInfo` per segment is
+   cheap but not free if polled; use `RegisterVideoMemoryBudgetChangeNotificationEvent`
+   or rate-limit. This is the one job PCI bus id cannot do: `DXGI_ADAPTER_DESC1` carries
+   no PCI field (verified against the struct we read: `Description`, `VendorId`,
+   `DeviceId`, `SubSysId`, `Revision`, three memory sizes, `AdapterLuid`, `Flags`), so
+   mapping a bus address to a DXGI adapter would need SetupAPI or WMI and be both more
+   code and more fragile than the compare we already have working.
+5. **`RequestAdapterOptions::power_preference = HighPerformance` is NOT sufficient
+   alone** and must not become the only rule. It is a field rather than a vendor check,
+   which is why it is tempting, but wgpu ranks by `device_type` and when no discrete
+   device is enumerable it does not error — it degrades to the best available, which is
+   the iGPU. That is precisely the silent failure this entry exists to prevent. Verify
+   what it returns on this machine in WP06 rather than trusting the name.
+
+**Why the engine needs more rigour than a game or a diffusion model.** Both hit the same
+hardware, but their failures are self-announcing: torch reaches NVIDIA only through
+CUDA, so the Intel adapter is invisible and a missing dGPU means zero CUDA devices, a
+crash, or a CPU fallback an hour slow. A game on the wrong GPU gets low framerate. Ours
+produces a complete, successful-looking export whose golden hashes silently stop
+reproducing. Same physics, opposite loudness, and the loudness is the whole argument.
+
+**Residuals, stated rather than hidden:**
+
+- The cost figures above are *shape*, not measurement. I know correlation creates a
+  second `VkInstance` and that this dominates, but nothing was ever timed. If WP07 needs
+  a startup budget, instrument the existing probe and report milliseconds.
+- `device_pci_bus_id` is an empty string when `VK_EXT_pci_bus_info` is unsupported. It
+  is populated on this machine. Require non-empty and hard-fail; do not treat a blank as
+  "unknown, proceed".
+- An environment-level fix may delete this class of problem: a MUX switch / Advanced
+  Optimus dGPU-only mode would stop the iGPU ever being selectable. **Unverified whether
+  this machine has one** — worth checking in BIOS or Armoury Crate before WP06, since it
+  is free and moves the decision out of code entirely. Our own 2026-11-04 measurement
+  (Intel driving the panel, NVIDIA reported phantom) is classic switching behaviour.
+- None of this is enforced by anything yet. It is a written constraint on packages that
+  do not exist. WP06 owns turning it into code.
 ---
 
 ## Test command
