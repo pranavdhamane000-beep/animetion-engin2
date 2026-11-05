@@ -17,10 +17,16 @@
    only when re-certifying the platform — after a driver update, a toolchain bump, or a
    change to the pinned FFmpeg. Trust a failing gate and the committed code over any
    summary, including one you were just given.
+5. On the first commit in a **new clone**, run `tools\install-git-hooks.cmd`. The hook
+   lives in `.git/hooks`, which git does not version, so a clone without it commits
+   unenforced and shows no sign of that. If this step is skipped, nothing in the
+   repository will tell you the gate was never actually running.
 
 A fresh session is expected to be able to complete any unbuilt package from
-those four steps alone, with no prior conversation. If it cannot, the state
-files are wrong — fix them before writing engine code.
+those steps alone, with no prior conversation. If it cannot, the state
+files are wrong — fix them before writing engine code. Step 5 is the one that a
+fresh session cannot recover from later: an unenforced gate looks exactly like a
+passing one.
 
 ## Authority
 
@@ -55,6 +61,11 @@ the files, and the code plus tests win over the files' claims about the code.
   fixtures, then record the outstanding approval in `BUILD_STATE.md`. Saying
   "code complete" is correct; saying "passes gate G12" is not, until the user
   approves.
+- **G1–G4 are yours.** Ruled by the user on 2026-11-05: WP01–WP05 gates are machine
+  checkable — rational arithmetic, NTSC conversion, subframe and negative-time
+  behaviour, identity round-trips, snapshot and simulation hashes — so a passing
+  test suite is the certification. State "G3 passed" plainly once its tests do.
+  This boundary is drawn at S1: from WP06 onward, return to the list above.
 
 ## Context discipline
 

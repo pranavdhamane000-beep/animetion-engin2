@@ -197,12 +197,17 @@ Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, an
 5. **New, from WP00:** the dGPU enumeration order is not stable and LUIDs change
    between runs. Any future automation that selects an adapter by ordinal, or gates
    on a recorded LUID, will intermittently target the iGPU.
-6. **The gate is local and unenforced.** `tools\ci.cmd` runs here, and it was shown
-   to fail on injected bad code — but there is no remote and no hosted pipeline, so
-   nothing stops a session from committing without running it. Spec 9.5 step 2 asked
-   for warnings-as-errors in CI; in local-script form that clause is met, in hosted
-   form it is not. DECISIONS.md #19 states the residual rather than claiming it closed.
-7. **Nothing in DECISIONS.md #18 is enforced by code.** The adapter-identity rules
+6. **The gate is enforced by a hook that lives outside the repo.** `tools\ci.cmd` runs
+   the three code steps and was shown to block a commit (HEAD unchanged, gate exit 1),
+   installed by `tools\install-git-hooks.cmd`. But `.git/hooks` is not versioned, so
+   **a fresh clone that skips the installer commits unenforced and displays no sign of
+   that** — AGENTS.md step 5 is the only thing standing between a new session and
+   believing it was protected. Spec 9.5 step 2 is met in local-script + local-hook
+   form; hosted CI remains unmet, because this repository has no remote. DECISIONS #20.
+7. **Nothing re-certifies the platform after a driver update.** GeForce Experience
+   updates NVIDIA silently; G0's evidence then describes hardware that no longer exists
+   and no alarm fires. `-WithProbes` is the remedy and it is manual.
+8. **Nothing in DECISIONS.md #18 is enforced by code.** The adapter-identity rules
    (PCI anchor, dedicated-VRAM floor, startup assertion) are constraints on packages
    that do not exist yet. WP06 must read #18; if it doesn't, no test will notice.
 

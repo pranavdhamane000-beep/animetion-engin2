@@ -551,6 +551,78 @@ pushing this repository somewhere. Not mine to make.
 silent partner) still stands — every probe result here is an unvalidated run. Installing
 the SDK is the fix and is not required by 9.2.
 
+
+### #20 — S1 — Pre-commit enforcement, and the gate's two silent failure modes
+
+Spec 9.5 step 2 asks for warnings-as-errors enforced, and G0 shipped with the gate as
+a suggestion. #19 built the gate; a gate nobody runs is the same gap with better
+documentation. User-approved 2026-11-05 to install a pre-commit hook.
+
+**Generated, not committed.** `.git/hooks` is inside the git directory and is not
+versioned, so the hook is written by `tools/install-git-hooks.ps1` and a fresh clone
+must run `tools\install-git-hooks.cmd` once. That leaves a real hole and it is stated
+rather than glossed: **cloning without running the installer yields a repository with
+no enforcement and no visible sign of that.**
+
+**Two failure modes that would otherwise pass unnoticed:**
+
+1. **Line endings.** The hook is `/bin/sh`, and Git for Windows' sh refuses a
+   CRLF-terminated shebang. A hook that cannot parse is indistinguishable from a
+   hook that passed. So the installer writes explicit LF with no BOM via
+   `[IO.File]::WriteAllText`, not through the PowerShell file cmdlets, which are
+   what produced the bug in the first attempt.
+   Verified on the installed file: 0 `0x0d` bytes, 47 `0x0a`, `sh -n` parses.
+2. **`core.hooksPath` silently disables it.** If that config is set, Git ignores
+   `.git/hooks` entirely and the install looks successful while enforcing nothing.
+   The installer reads the setting after writing and warns loudly when it is
+   non-empty. On this repo it is unset, which `git config --get core.hooksPath`
+   confirms.
+
+**Proven to block, not just to run.** Committed an attempt with unformatted code
+staged: the hook ran the gate, all three steps failed, HEAD did not move. It blocked a
+second time after a botched revert — `git checkout -- <file>` restores from the
+**index**, which still held the injected line, so the working tree came back correct
+while the staged content stayed broken. Caught by `git diff --cached`, fixed with
+`git checkout HEAD -- <file>`, which resets both. That is the same lesson as #13:
+verifying the thing you can see is not verifying the thing that runs.
+
+**Probes excluded from the hook deliberately.** ~50s on every commit, and spec 9.12
+ties their validity to this adapter, driver and FFmpeg build, so they belong at
+re-certification (`tools\ci.ps1 -WithProbes`), not in a commit path. The hook runs
+fmt, clippy and `test --locked` only.
+
+**Known cost, accepted:** the gate inspects the working tree, not the staged diff —
+`cargo fmt` and `cargo clippy` have no staged-snapshot mode. Committing a subset of
+local edits therefore checks more than is being committed. That errs on the safe side,
+but it does mean a commit can be blocked by something you never intended to stage.
+
+**Bypass exists and is meant to be visible:** `git commit --no-verify`. Nothing in
+this project will pretend that is equivalent to passing.
+
+### #21 — S1 — G1 through G4 are self-certifiable
+
+AGENTS.md listed WP10, WP14–17 and WP18–22 as gates an agent may not certify and said
+nothing about G1. That left WP01's definition of "done" undefined, which is the wrong
+kind of ambiguity to carry into the package that decides the engine's numeric core.
+Answered by the user 2026-11-05: **WP01–WP05 gates may be self-certified.**
+
+**Why that is the correct split, not a convenience.** G1–G4 assert arithmetic and
+identity properties — rational round-trips, NTSC and subframe boundaries, negative
+time, stable ids, snapshot and simulation hash equality. A test either passes or it
+does not, and no human judgement sits between the run and the verdict. The gates held
+back for approval are the ones whose exit criteria are "this reads as weight", "this
+cut lands", "the action is legible" — properties a green suite cannot establish.
+
+**Boundary, stated so it does not spread:** the ruling covers S1 only. From WP06 the
+default reverts to code-complete-plus-outstanding-approval, because G5 introduces
+golden frames and colour, and ADR-0016's tolerance question is a human call about
+what counts as visually identical.
+
+**Consequence:** WP01 should say "G1 passed" outright once its tests run green.
+Hedging with "code complete" after a passing suite would be the same false modesty
+that let an unmet clause look satisfied in #19 — understating a result is how a
+requirement quietly goes unverified.
+
 ---
 
 ## Test command
