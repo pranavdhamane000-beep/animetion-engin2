@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anim-engine.local/schemas/commands/v1.json",
+  "title": "anim_engine command envelopes and payloads, schema version 1",
+  "description": "The wire form of an envelope (spec 12.8) and of the twelve command payloads it carries (spec 12.2: every command payload type has a versioned JSON schema). Hand-authored, and checked against the bytes `anim_commands::registry::encode_command` actually writes by `the_committed_command_schema_matches_the_encoder` in crates/anim_commands/tests/atomicity.rs. That test compares the field sets, and `registry::payload_digest`'s own test covers the canonical stream, so this file and the dispatch table cannot drift apart silently. Dispatch is keyed on (kind, schema_version): a payload that needs a second shape registers a second handler rather than changing this file, and an envelope asking for a version the registry does not carry is refused as UnknownCommand naming both halves.",
+  "payload_schema_version": 1,
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "command_id",
+    "expected_scene_revision",
+    "transaction_label",
+    "commands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "command_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "The idempotency handle (spec 12.5 step 5). Reoffering an accepted id with the same canonical envelope hash returns the original result; with a different hash it is a CommandReplayMismatch."
+    },
+    "expected_scene_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The optimistic-concurrency check, named as spec 12.8 names it even though it is compared against the document's project-wide revision."
+    },
+    "transaction_label": { "type": "string" },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Non-empty (spec 12.6), executed in this declared order, undone in the reverse order of their inverses.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "schema_version", "payload"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "upsert_asset",
+              "remove_asset",
+              "upsert_scene",
+              "remove_scene",
+              "add_node",
+              "remove_node",
+              "upsert_track",
+              "remove_track",
+              "set_property_key",
+              "remove_property_key",
+              "place_marker",
+              "remove_marker"
+            ]
+          },
+          "schema_version": { "type": "integer", "const": 1 },
+          "payload": { "type": "object" }
+        }
+      }
+    }
+  },
+  "commands": {
+    "upsert_asset": {
+      "type": "object",
+      "required": ["record"],
+      "additionalProperties": false,
+      "properties": { "record": { "type": "object" } },
+      "description": "Spec 11.5 step 8's command: it commits a record `anim_assets::import` already returned. Its inverse is the record spec 11.6's reimport displaced, or `remove_asset` when nothing was displaced."
+    },
+    "remove_asset": {
+      "type": "object",
+      "required": ["asset_id"],
+      "additionalProperties": false,
+      "properties": { "asset_id": { "type": "string" } },
+      "description": "Refused while another record depends on it: `validate_manifest` reports the dangling edge rather than leaving a manifest that cannot resolve."
+    },
+    "upsert_scene": {
+      "type": "object",
+      "required": ["scene_id", "scene"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "scene": { "type": "object" }
+      },
+      "description": "Carries the whole scene, because the inverse of a replacement has to carry what was there."
+    },
+    "remove_scene": {
+      "type": "object",
+      "required": ["scene_id"],
+      "additionalProperties": false,
+      "properties": { "scene_id": { "type": "string" } }
+    },
+    "add_node": {
+      "type": "object",
+      "required": ["scene_id", "node"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "node": { "type": "object" }
+      },
+      "description": "Refused if the id is already in the scene: spec 10.8 generates an id once at creation."
+    },
+    "remove_node": {
+      "type": "object",
+      "required": ["scene_id", "node_id"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "node_id": { "type": "string" }
+      },
+      "description": "Refused while children or tracks refer to the node. Cascading would delete authored animation to complete one delete, and a subtree removed as a side effect cannot be restored by the one node this command's inverse carries."
+    },
+    "upsert_track": {
+      "type": "object",
+      "required": ["scene_id", "track"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "track": { "type": "object" }
+      }
+    },
+    "remove_track": {
+      "type": "object",
+      "required": ["scene_id", "track_id"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "track_id": { "type": "string" }
+      }
+    },
+    "set_property_key": {
+      "type": "object",
+      "required": ["scene_id", "track_id", "key"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "track_id": { "type": "string" },
+        "key": { "type": "object" }
+      },
+      "description": "Never creates a track as a side effect: if it did, the inverse of a first key would have to delete the track too, and one command would need two different inverses depending on state the caller did not choose. That is `upsert_track`."
+    },
+    "remove_property_key": {
+      "type": "object",
+      "required": ["scene_id", "track_id", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "track_id": { "type": "string" },
+        "position": { "type": "object" }
+      }
+    },
+    "place_marker": {
+      "type": "object",
+      "required": ["scene_id", "marker"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "marker": { "type": "object" }
+      },
+      "description": "Refused when the same (position, label) pair is already there, so that the command either changes state or reports."
+    },
+    "remove_marker": {
+      "type": "object",
+      "required": ["scene_id", "marker"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "type": "string" },
+        "marker": { "type": "object" }
+      }
+    }
+  }
+}

@@ -5,7 +5,22 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 12.4: `anim_project -> anim_assets -> anim_core`, with serde, serde_json,
+# thiserror and the shared `anim_core::io::atomic_replace`. No evaluation, rendering
+# or editor dependency appears here because none is permitted; the document is the
+# authoritative state that those crates read through WP04's snapshots.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Test fixtures only, and already in the lock: identifiers in these tests are v5
+# derivations over a fixed namespace, exactly as `anim_assets/tests/store.rs` does it.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anim-engine.local/schemas/project/v1.json",
+  "title": "anim_engine project document, schema version 1",
+  "description": "The persisted shape of crates/anim_project's ProjectDocument (spec 12.8) and the types it embeds. Hand-authored, and checked against the bytes the Rust serializers actually write by `the_committed_schema_matches_what_the_serializers_write` in crates/anim_project/tests/persistence.rs -- that test is the reason this file can be read without running anything and still be trusted. Acceptance of a real file happens at the typed boundary in anim_project::migrate and anim_project::schema, not by a validator: spec 5.1 names no JSON Schema dependency, and a non-canonical rational or a malformed uuid is already refused by its own constructor. A member's ORDER inside one object is not expressible in JSON Schema and is not asserted here; it belongs to canonical serialization (ADR-0005, closed by WP03) and is proven byte-for-byte by anim_project::schema::verify_canonical_bytes.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "revision",
+    "frame_rate",
+    "assets",
+    "scenes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "The document version. Independent of assets.schema_version and of the command envelope version (ADR-0005 Decision 4, Consequence 5)."
+    },
+    "project_id": { "$ref": "#/$defs/uuid" },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "One increment per committed batch; zero is a new document (spec 10.8, 12.6)."
+    },
+    "frame_rate": { "$ref": "#/$defs/frame_rate" },
+    "assets": { "$ref": "#/$defs/manifest" },
+    "scenes": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/uuid" },
+      "additionalProperties": { "$ref": "#/$defs/scene" },
+      "description": "Keyed by SceneId. Order in the file is the map's key order, which is id-byte order; a `BTreeMap` makes that a property of the type rather than of the writer."
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Lowercase hyphenated, exactly one spelling (spec 5.1, anim_core::id)."
+    },
+    "rational": {
+      "type": "string",
+      "pattern": "^-?[0-9]+/[1-9][0-9]*$",
+      "description": "Reduced, positive denominator, zero as 0/1. A non-canonical spelling is refused on read, not normalized (ADR-0004)."
+    },
+    "frame_pos": {
+      "type": "object",
+      "required": ["frame", "subframe"],
+      "additionalProperties": false,
+      "properties": {
+        "frame": { "type": "integer" },
+        "subframe": {
+          "$ref": "#/$defs/rational",
+          "description": "Normalized to [0,1); overflow carries into `frame`, which is why one instant has exactly one spelling (DECISIONS.md #22)."
+        }
+      }
+    },
+    "frame_rate": {
+      "type": "object",
+      "required": ["num", "den"],
+      "additionalProperties": false,
+      "properties": {
+        "num": { "type": "integer", "minimum": 1 },
+        "den": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "easing": {
+      "type": "string",
+      "enum": ["linear", "step"],
+      "description": "The two modes spec 13.6 states a rule for. Later packages add theirs."
+    },
+    "property_path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$"
+    },
+    "property_value": {
+      "description": "Externally tagged, and there is no float variant: spec 7.1 keeps rounded values out of persisted state.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["rational"],
+          "additionalProperties": false,
+          "properties": { "rational": { "$ref": "#/$defs/rational" } }
+        },
+        {
+          "type": "object",
+          "required": ["bool"],
+          "additionalProperties": false,
+          "properties": { "bool": { "type": "boolean" } }
+        },
+        {
+          "type": "object",
+          "required": ["text"],
+          "additionalProperties": false,
+          "properties": { "text": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "required": ["asset"],
+          "additionalProperties": false,
+          "properties": { "asset": { "$ref": "#/$defs/uuid" } }
+        }
+      ]
+    },
+    "property_key": {
+      "type": "object",
+      "required": ["position", "value", "easing"],
+      "additionalProperties": false,
+      "properties": {
+        "position": { "$ref": "#/$defs/frame_pos" },
+        "value": { "$ref": "#/$defs/property_value" },
+        "easing": { "$ref": "#/$defs/easing" }
+      }
+    },
+    "property_curve": {
+      "type": "object",
+      "required": ["keys", "authored_default"],
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/property_key" },
+          "description": "Sorted by canonical time and unique in it (spec 13.2). Enforced by PropertyCurve's constructor, which is also why this loads through that constructor rather than through a derived impl."
+        },
+        "authored_default": {
+          "description": "Spec 13.6: an empty property uses its authored default.",
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/property_value" }
+          ]
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "parent",
+        "sibling_order",
+        "display_name",
+        "defaults"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "parent": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/uuid" }],
+          "description": "null is a root. Roots are visited in NodeId order; children in `sibling_order` (spec 13.7)."
+        },
+        "sibling_order": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unique among one parent's children. Stored on roots but never consulted there."
+        },
+        "display_name": { "type": "string" },
+        "defaults": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/property_path" },
+          "additionalProperties": { "$ref": "#/$defs/property_value" }
+        }
+      }
+    },
+    "track": {
+      "type": "object",
+      "required": ["track_id", "node_id", "property", "curve"],
+      "additionalProperties": false,
+      "properties": {
+        "track_id": { "$ref": "#/$defs/uuid" },
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "property": { "$ref": "#/$defs/property_path" },
+        "curve": { "$ref": "#/$defs/property_curve" }
+      }
+    },
+    "marker": {
+      "type": "object",
+      "required": ["position", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "position": { "$ref": "#/$defs/frame_pos" },
+        "label": { "type": "string", "minLength": 1 }
+      }
+    },
+    "scene": {
+      "type": "object",
+      "required": ["name", "nodes", "tracks", "markers"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "nodes": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/uuid" },
+          "additionalProperties": { "$ref": "#/$defs/node" }
+        },
+        "tracks": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/uuid" },
+          "additionalProperties": { "$ref": "#/$defs/track" }
+        },
+        "markers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/marker" },
+          "description": "Sorted by (position, label) and unique in that pair."
+        }
+      }
+    },
+    "asset_kind": {
+      "type": "string",
+      "enum": ["image", "audio", "font", "vector", "rig", "other"]
+    },
+    "manifest_record": {
+      "type": "object",
+      "required": [
+        "asset_id",
+        "content_hash",
+        "byte_length",
+        "kind",
+        "importer_version",
+        "dependencies",
+        "display_name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": { "$ref": "#/$defs/uuid" },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "One text spelling of 32 bytes, which is also the object file name (spec 11.8, ADR-0005)."
+        },
+        "byte_length": { "type": "integer", "minimum": 0 },
+        "kind": { "$ref": "#/$defs/asset_kind" },
+        "importer_version": { "type": "integer", "minimum": 1 },
+        "dependencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/uuid" },
+          "description": "Sorted by id and deduplicated at construction, with no self-edge -- the field spec 11.8 lists as `pub` but DECISIONS.md #22 and ADR-0005 Decision 6 make private (deviation row 9)."
+        },
+        "display_name": { "type": "string" }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "required": ["schema_version", "records"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "description": "The asset-schema version, embedded rather than flattened: the manifest keeps its own encoding and its own digest inside a document (ADR-0005 Consequence 5, closed by WP03)."
+        },
+        "records": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/uuid" },
+          "additionalProperties": { "$ref": "#/$defs/manifest_record" }
+        }
+      }
+    }
+  }
+}

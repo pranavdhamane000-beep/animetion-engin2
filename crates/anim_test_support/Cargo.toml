@@ -7,6 +7,13 @@ publish.workspace = true
 
 [dependencies]
 anim_core = { path = "../anim_core" }
+# Added for `wp03_save`, spec 12.12's killed-process scenarios: 4.2 assigns fault
+# injection to this crate, and a save that dies mid-write has to save something. Only
+# workspace members and the already-locked `uuid` join the graph, so `Cargo.lock` gains
+# dependency edges and no new crate. DECISIONS.md #31.
+anim_assets = { path = "../anim_assets" }
+anim_project = { path = "../anim_project" }
+uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -5,7 +5,24 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 12.4: `anim_commands -> anim_project`, on top of the chain
+# `anim_project -> anim_assets -> anim_core`. `anim_assets` is named explicitly
+# because the registry and the envelope hash consume three of its items that
+# `anim_project` does not and should not re-export: `ContentHash` as a return type,
+# `hash_bytes`, and `manifest_digest`. Re-exporting another crate's *functions* would
+# make `anim_project` look like the owner of content hashing, which spec 11.2 assigns
+# to `anim_assets`. DECISIONS.md #31.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_project = { path = "../anim_project" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

@@ -982,6 +982,204 @@ verification should read that as the budget, not as a bug to fix in passing.
 
 ---
 
+## 2026-11-06 (WP03)
+
+### #31 — WP03 — rulings taken while building the mutation boundary
+
+Answered by the user 2026-11-06 as four bundled choices, then settled in code. Each is a
+constraint on later packages, and two are additions to spec-listed shapes that must not be
+rediscovered as mistakes.
+
+1. **The raw scene model is minimal but real.** Spec 12.3 assigns `scene.rs` "raw scenes,
+   nodes, tracks and markers" and `property.rs` "rational-time property keys", and no
+   section anywhere gives their fields — searched. Ruled: build what 12.12's commands need
+   to mutate and what WP04's evaluator needs to read, and stop. So `SceneData` holds nodes
+   keyed by `NodeId` (which *is* the root order spec 13.7 wants), each node carrying `parent`
+   plus a separate persisted `sibling_order` (13.7's two orderings, not one), one
+   `PropertyCurve` per `(node, property)` pair, tracks as the container that makes 13.2's
+   "unique canonical times within each property" unique *within something*, and markers
+   identified by `(position, label)`.
+   **Deferred on purpose:** motion-layer priority, pre/post extrapolation modes and key
+   provenance tags. Spec 15 and 21 assign those rules, and authoring their data model here
+   would decide a later package's semantics by accident.
+   **Rejected:** placeholders until WP04 — 12.3's responsibility column would be unmet and
+   "rollback from every command index" would have nothing to roll back.
+2. **The command set is twelve, because it has to close under inversion.** 12.12 asks for an
+   exact inverse per command, so `Upsert` needs the `Remove` half and vice versa:
+   upsert/remove asset, upsert/remove scene, add/remove node, upsert/remove track,
+   set/remove property key, place/remove marker. The user chose "six to seven document
+   commands"; six cannot state its own inverses, and the extra six are not new capabilities
+   but the other face of each of the first six. `UpsertAsset` is the one command the spec
+   names for this package (11.5 step 8), and its inverse is the record 11.6's reimport
+   displaced — which is why `AssetManifest::insert` returns what it replaced.
+   **Rejected:** forward-loading `AddKeyframe`/`AddMotionLayer`/`SetCameraParams`; those names
+   are WP15's (spec 15's command list), as are WP12/13/14/18–21's.
+3. **`SetPropertyKey` never creates a track.** If setting a first key also created the track,
+   that command would need two different inverses depending on state the caller did not
+   choose. Track creation is `UpsertTrack`, and `set_property_key` refuses an unknown track id.
+4. **Two spec-listed shapes gained a field, and one return type lost one.**
+   `AppliedTransaction` (12.8 lists four fields) carries `transaction_label`: 12.9 makes
+   `undo`/`redo` return a `CommandOutcome`, and an undo list row whose label is empty is a
+   guess. The alternative was a parallel hash→label map in `History`, i.e. a second copy of a
+   fact that belongs with the transaction. `CommandOutcome.command_id` is
+   `Option<CommandId>`, `None` for undo and redo: 12.8 gives a transaction no envelope id, and
+   deriving one by truncating a digest would be an identity nothing else can reproduce.
+   Both are recorded the way #29 recorded `AssetError`'s four additions rather than folded
+   into something adjacent.
+5. **Acceptance checks run in 12.7's order, and replay comes before the revision.** 12.7 lists
+   "schema, command ID replay, project ID, expected revision, nonempty batch and revision
+   capacity". Checking the revision first would make a legitimate replay after an undo a
+   `RevisionConflict`, because the document is then at a different revision than the one the
+   original result names — and 12.7 promises "the original result". `a_new_forward_edit_
+   clears_redo_and_the_retired_ids_stay_idempotent` asserts the consequence: a retired
+   transaction's id is still idempotent, and recognizing it must not re-apply it.
+6. **The registry is the authorization surface, so it needed a dependency edge.** 12.10's
+   "future LLM automation … receives no privileged mutation route" is enforced by
+   `CommandProcessor::check_registered` refusing a command the injected registry does not
+   dispatch, before any of it reaches a document. That makes the registry a data structure a
+   caller can narrow rather than a decode helper with a warning printed above it. It also
+   made `anim_commands → anim_assets` explicit in `Cargo.toml`: 12.4 names only
+   `anim_commands → anim_project`, and BUILD_STATE read that chain as reaching `ContentHash`
+   legally — which it does for the *type*, via `anim_project`'s re-export — but the envelope
+   hash needs `hash_bytes`, and forwarding another crate's *functions* would make
+   `anim_project` look like the owner of content hashing, which 11.2 assigns to
+   `anim_assets`. Deviation row 11.
+7. **The schemas are hand-written artifacts, and the drift test is the security.** Ruled with
+   the user: JSON Schema draft 2020-12 files under `schemas/project/` and
+   `schemas/commands/`, with acceptance remaining at the typed boundary — a non-canonical
+   rational, an uppercase uuid, an unsorted dependency list or a duplicate key time is already
+   refused by the constructor that reads it. No validator dependency, because 5.1 names none
+   and it would need an ADR for a feature the types already enforce. What makes the artifacts
+   mean something instead of decorate is `the_committed_schema_matches_what_the_serializers_write`
+   and `the_committed_command_schema_matches_the_encoder`: both compare the declared field set
+   against the members actually emitted, so a rename that missed the file fails the gate.
+8. **Undo and redo *move* a transaction between stacks; they do not mirror it.** The first
+   implementation built the redo entry from the sequence the undo step had just applied, which
+   made redo re-apply the inverses; two tests caught it (#32). An entry now means the same
+   thing wherever it sits — `forward` is what redo applies, `inverse` is what undo applies
+   backwards — so stepping back changes only `resulting_revision`, and the invariant "a
+   transaction lives in exactly one history stack" (12.8) becomes the API's shape rather than
+   a discipline. The collected inverses still go into the moved entry, so the pairing reflects
+   what the run produced rather than what the stored copy asserts.
+9. **History is unbounded, deliberately.** An earlier draft capped the undo stack at 4096 with
+   a `discarded` counter. The cap was an engine policy 12.1 does not ask for, and what it
+   traded away was the guarantee the package exists to provide: the transaction it forgets is
+   the one an operator is about to be handed back. A session's history is bounded by the
+   transactions the session ran. If this ever becomes a real memory problem the fix is a
+   reportable eviction policy with a spec clause behind it, not a silent number in a
+   constructor.
+10. **Scenes own their curve mutations.** `SceneData::set_track_key` and
+    `remove_track_key` exist instead of a `track_mut`, because a curve's sorted-and-unique
+    rule and the scene's one-track-per-property rule are the same rule seen from two levels.
+    Every scene mutator clones, changes, re-validates and swaps (`change`/`try_change`), so a
+    refused command leaves the scene exactly as it was. `commit_if_valid` in
+    `anim_commands` is the same discipline at document scale, and it is the only writer.
+11. **`save_atomic` uses `StagedWriter`/`publish` plus its own byte comparison, not
+    `write_atomic`.** 12.12 requires failures and kills at every persistence boundary, and
+    `write_atomic`'s boundaries are inside the call. Staging by hand makes each step an
+    observable `Boundary`; the price is `publish`'s length-only post-rename check (#28's
+    economy for streamed payloads), so the save re-reads and compares the destination itself.
+    For a project file that is a few kilobytes, and "never mixed bytes" is a claim about
+    content. ADR-0006's new Recovery-policy section records the reasoning.
+12. **Three files spec 12.3 does not list.** `crates/anim_project/tests/persistence.rs`
+    (12.12 requires a fault-injection suite alongside the functional one, and the persistence
+    clauses cannot live in `anim_commands/tests/atomicity.rs` without reaching across 12.4's
+    boundary), `crates/anim_test_support/src/bin/wp03_save.rs` and
+    `crates/anim_test_support/tests/wp03_fault_injection.rs` (12.12's "kill test processes at
+    each save stage" needs a process that dies; 4.2 already assigns fault injection to that
+    crate, and `CARGO_BIN_EXE_wp03_save` makes the child the same build as the parent).
+    Deviation row 10.
+13. **The kill scenario asserts its own residue.** `expect_residue` requires exactly one
+    surviving `.tmp` at the two boundaries between staging and rename, and none elsewhere.
+    Without it, a kill that landed after the rename would still satisfy every content
+    assertion while proving nothing about interruption — the same class of gap #13 and #20
+    describe, where the thing you can see is not the thing that runs.
+
+### #32 — WP03 — G2 result summary, and what the tests caught
+
+**G2 passed 2026-11-06**, self-certified under DECISIONS.md #21. G2 is the joint gate of
+WP02 and WP03 (spec 8.3: "Asset verification, atomic commands, save faults, and migrations
+pass"), and both halves are now evidenced: 11.12 in full at WP02's commit, and 12.12's
+functional suite plus fault-injection suite here. `tools\ci.cmd`: fmt, clippy
+`--workspace --all-targets -D warnings`, `test --workspace --locked` all green. Probes were
+not re-run — adapter, driver, toolchain and pinned FFmpeg are unchanged, so `-WithProbes`
+would re-certify hardware nobody moved.
+
+**The workspace suite is 313 tests**, up from 188: `anim_project` 67 (53 unit + 14 in
+`tests/persistence.rs`), `anim_commands` 53 (39 unit + 14 in `tests/atomicity.rs`),
+`anim_test_support` 19 (6 unit, 8 `wp00_smoke`, 5 in `tests/wp03_fault_injection.rs`),
+`anim_core` 83 and `anim_assets` 91 unchanged. **`Cargo.lock` gained 22 lines and no new
+crate**: the additions are dependency edges for `anim_project`, `anim_commands` and
+`anim_test_support`, over versions already resolved by WP00–WP02. `dev-dependencies`
+`tempfile` and `uuid` were already in the graph.
+
+**Nine defects and wrong assertions, all found by tests or by the scenarios they describe
+rather than by review.**
+
+1. `serde_json::Value` does not preserve object member order — its map is a
+   `BTreeMap<String, _>`, so members come out alphabetical. The first version of
+   `the_json_field_order_is_the_declaration_order_of_spec_12_8` proved the ordering through a
+   `Value` and failed, which is what forced the rule to be stated on the `to_vec` path
+   instead (ADR-0005 Consequence 7). It immediately mattered twice: `migrate::upgrade_with`
+   would have re-serialized a current-version file through a `Value` on every load,
+   rewriting bytes for a document that needed nothing done to it and breaking the
+   canonical-bytes claim for its own test, and `recovery` needed
+   `CompleteCandidate::canonical` so a file in the `Value` spelling is reported as usable-but-
+   non-canonical rather than trusted or silently rewritten.
+2. **The undo/redo stack bookkeeping was wrong in the way that only an equality test
+   catches.** The first implementation built the redo entry's `forward` list from the sequence
+   the undo step had just applied — the inverses — so redo faithfully re-applied the undo. Two
+   tests failed: `undo_then_redo_restores_the_document_byte_for_byte` and
+   `undoing_a_multi_command_batch_reverses_it_and_redo_reapplies_it`. The corrected model is
+   in #31.8. A `mirrored()` helper was left in `history.rs` as the relationship *description*,
+   with a comment saying the processor must not derive its entry from it.
+3. `load_document` reported an out-of-range embedded manifest version as a generic parse
+   failure, because `ProjectDocument`'s `Deserialize` validates and serde boxes the error into
+   a string. `UnsupportedSchema`'s machine-selectable context (spec 7.4) was gone by the time a
+   caller saw it. Fixed by checking both version numbers from the parsed `Value` *before* the
+   typed read, in `migrate::load_document_with_chain`.
+4. A negative test that was not negative: `non_canonical_bytes` perturbed the file by swapping
+   its last two bytes, and the document ends in `}}`, so the "damage" was a no-op and the
+   classifier accepted the file happily. Replaced with a whitespace insertion plus an
+   assertion on the reported byte offset.
+5. `SceneData::remove_node` pre-checked, mutated `self`, then validated — so a document that
+   arrived inconsistent could be left half-changed by a removal that reported failure. Moved
+   onto the same clone-and-swap path as every other mutator.
+6. `expect_residue` exists because the killed-process suite would otherwise pass for the wrong
+   reason: if the kill landed after the rename, every content assertion still holds while the
+   scenario silently becomes a test of a completed save. Requiring one surviving temporary at
+   the two mid-sequence boundaries is what makes the kill observable.
+7. The backup negative control was pointed at `before-replacement`, where no backup exists yet,
+   because `anim_core` writes the backup inside `publish`, immediately before the rename. The
+   control moved to `after-replacement`. Related: the classifier's parse and canonical
+   re-serialization rules were **removed** rather than kept, because the "is it one of the two
+   byte streams" rule subsumes them and a rule nothing can violate cannot be tested — the
+   surviving rules each have a corruption that fires them, including a newer autosave, which
+   is what proves the recovery clause is live rather than always agreeing.
+8. Two expectations that were arithmetic rather than code: the revision after eight
+   apply/undo/redo cycles is `1 + 8*3`, not 17 — undo and redo each commit a new revision,
+   which is 12.6's "commits a new revision" and something a test that only looked at state
+   would never have noticed — and a fixture that gave every root the same `sibling_order`
+   failed for the right rule and the wrong reason, which is why `add_node` derives its order
+   from its id.
+9. `history::is_empty` disagreed with a test's expectation about a drained stack, and the
+   disagreement was the real thing: stepping back through every transaction empties the stacks
+   but must **not** erase the memory that an id was accepted, or a retried batch after an undo
+   would apply twice. The test was corrected to assert both halves.
+
+**Carried forward, not hidden.** The command set will grow, and 12.12's
+"rollback from every command index" will need re-running over the new kinds rather than
+trusting this package's fixture batch; `every_command_kind_has_an_inverse_that_closes` is the
+test to extend. `schemas/export/` (spec 4.1, 12.3 lists only `project/` and `commands/` here)
+is still unauthored and is WP09's. Autosave *policy* — when one fires, how many are kept — is
+not in spec 12 and is not invented here; 12.7's recovery rules are implemented, and WP10's
+session owns the cadence. Spec 12.7's "attempt directory flushing through a backup-semantics
+handle" is `DirectoryFlush::{Flushed, Unsupported}` and BUILD_STATE risk 10, unchanged: which
+branch this machine takes is still asserted by no test, and what is certified is the file bytes
+and the rename.
+
+---
+
 ## Test command
 
 **Use the gate. `tools\ci.cmd` is the single entry point** (DECISIONS.md #19) and it
