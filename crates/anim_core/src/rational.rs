@@ -165,6 +165,28 @@ impl Rational {
         })
     }
 
+    /// The value as `f64`, by the one spelling every consumer in this workspace uses.
+    ///
+    /// Spec 13.6 requires the float to appear "only at the final numeric operation", and a
+    /// rule that depends on each caller inventing the same conversion at the same moment is
+    /// a rule that gets spelled three ways. This is that one conversion: the numerator and
+    /// the denominator are each cast with the correctly-rounded `i128 as f64` the language
+    /// defines, and the quotient is then rounded once more by the division. Two of them are
+    /// therefore not bit-identical to an arbitrary-precision decimal expansion of the
+    /// fraction, which is fine — the guarantee every caller actually needs is that the same
+    /// build in two processes produces the same bits, and that is what a fixed sequence of
+    /// correctly-rounded operations gives.
+    ///
+    /// A value whose numerator or denominator exceeds `2^53` loses precision here. That is
+    /// the intended place for it to happen: a rational that large only arrives from
+    /// arithmetic this crate already checks, and a float that is very slightly wrong at the
+    /// end of an evaluation cannot reorder, re-identify or re-time anything, because every
+    /// ordering and every identity upstream of this call is still exact.
+    #[must_use]
+    pub fn to_f64(self) -> f64 {
+        self.num() as f64 / self.den() as f64
+    }
+
     /// Mathematical floor, not truncation. `-1/2` floors to `-1`, which is what
     /// makes a negative exact boundary select the mathematically preceding frame
     /// (spec 10.7) instead of collapsing onto zero.

@@ -35,10 +35,11 @@
 use std::path::{Path, PathBuf};
 
 use anim_core::id::Revision;
-use anim_core::id::{AssetId, NodeId, ProjectId, SceneId, TrackId};
+use anim_core::id::{AssetId, EventDefinitionId, NodeId, ProjectId, SceneId, TrackId};
 use anim_core::io::atomic_replace::DirectoryFlush;
 use anim_core::rational::Rational;
 use anim_core::time::{FramePos, FrameRate};
+use anim_project::event::{EventDefinition, EventKind};
 use anim_project::property::{Easing, PropertyCurve, PropertyKey, PropertyPath, PropertyValue};
 use anim_project::recovery::{CandidateState, RecoveryDecision};
 use anim_project::save::{Boundary, ProjectPaths, RecoveryMetadata};
@@ -102,13 +103,9 @@ fn rich_document(revision: u64) -> ProjectDocument {
     let root_id = root.node_id;
     let mut scene = SceneData::new("shot01").unwrap();
     scene.insert_node(root).unwrap();
+    let cel_id = NodeId::derive(&namespace(), b"cel");
     scene
-        .insert_node(NodeData::new(
-            NodeId::derive(&namespace(), b"cel"),
-            Some(root_id),
-            0,
-            "cel",
-        ))
+        .insert_node(NodeData::new(cel_id, Some(root_id), 0, "cel"))
         .unwrap();
     scene
         .insert_track(TrackData::new(
@@ -127,6 +124,22 @@ fn rich_document(revision: u64) -> ProjectDocument {
                         PropertyValue::Rational(Rational::from_i128(0)),
                         Easing::Step,
                     ),
+                    // WP04's third easing spelling, in the fixture so that the curve's
+                    // canonical encoding and its save/load round trip are covered by every
+                    // persistence test below rather than by one new one.
+                    PropertyKey::new(
+                        FramePos::at_frame(12),
+                        PropertyValue::Rational(Rational::new(251, 10).unwrap()),
+                        Easing::Curve(
+                            anim_project::EasingCurve::new([
+                                Rational::from_i128(0),
+                                Rational::new(1, 4).unwrap(),
+                                Rational::new(3, 4).unwrap(),
+                                Rational::from_i128(1),
+                            ])
+                            .unwrap(),
+                        ),
+                    ),
                 ],
                 Some(PropertyValue::Rational(Rational::from_i128(0))),
             )
@@ -138,6 +151,29 @@ fn rich_document(revision: u64) -> ProjectDocument {
         .unwrap();
     scene
         .insert_marker(Marker::new(FramePos::at_frame(0), "start"))
+        .unwrap();
+    // Two events, on two different nodes and with priorities that do not follow the
+    // frames they sit on, so that a fixture consumer of spec 13.7's ordering has
+    // something to order rather than an already-sorted list.
+    scene
+        .insert_event(EventDefinition::new(
+            EventDefinitionId::derive(&namespace(), b"cut-to-cel"),
+            FramePos::at_frame(12),
+            3,
+            root_id,
+            EventKind::CameraCut,
+            0,
+        ))
+        .unwrap();
+    scene
+        .insert_event(EventDefinition::new(
+            EventDefinitionId::derive(&namespace(), b"foley-contact"),
+            FramePos::new(12, Rational::new(1, 2).unwrap()).unwrap(),
+            -1,
+            cel_id,
+            EventKind::AudioCue,
+            1,
+        ))
         .unwrap();
     assert!(
         document.insert_scene(scene_id(), scene).is_none(),
@@ -472,16 +508,45 @@ fn an_old_schema_version_migrates_and_a_newer_one_is_refused_with_its_number() {
     let document = rich_document(2);
     anim_project::save::save_atomic(&document, &paths.document()).unwrap();
 
-    // v1 is the only version with a fixture, and 12.5 step 9 asks for one per version.
     let bytes = read(&paths.document());
     assert_eq!(
         anim_project::migrate::read_document_version(&bytes).unwrap(),
-        1
+        anim_project::document::PROJECT_SCHEMA_VERSION,
+        "a file this build wrote reports the version this build writes"
     );
     assert_eq!(schema::deserialize_canonical(&bytes).unwrap(), document);
 
+    // The other half of the same rule, in the direction that used to be hypothetical:
+    // spec 12.5 step 9 asks for a fixture per version, and `project_v1.anim.json` is the
+    // version below this one. Reading it is what proves the bump came with a way in
+    // rather than only a way to refuse.
+    let v1 = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("project_v1.anim.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        anim_project::migrate::read_document_version(&v1).unwrap(),
+        1
+    );
+    let migrated = schema::deserialize_canonical(&v1).expect("a v1 file is migratable");
+    assert_eq!(
+        migrated.schema_version,
+        anim_project::document::PROJECT_SCHEMA_VERSION,
+        "and it arrives at this build's version"
+    );
+    assert!(
+        migrated
+            .scenes
+            .values()
+            .all(|scene| scene.events().count() == 0),
+        "the step adds the section and does not invent events to put in it"
+    );
+
     let mut future = document.clone();
-    future.schema_version = 2;
+    future.schema_version = anim_project::document::PROJECT_SCHEMA_VERSION + 1;
     let future_bytes = serde_json::to_vec(&future).unwrap();
     let error = schema::deserialize_canonical(&future_bytes).unwrap_err();
     match error {
@@ -491,7 +556,7 @@ fn an_old_schema_version_migrates_and_a_newer_one_is_refused_with_its_number() {
             supported,
         } => {
             assert_eq!(which, "project document");
-            assert_eq!(found, 2);
+            assert_eq!(found, anim_project::document::PROJECT_SCHEMA_VERSION + 1);
             assert_eq!(supported, anim_project::document::PROJECT_SCHEMA_VERSION);
         }
         other => panic!("expected an unsupported-schema refusal, got {other}"),
@@ -525,7 +590,10 @@ fn recovery_metadata_names_the_revision_that_makes_a_file_selectable() {
     let metadata = RecoveryMetadata::for_document(&document).unwrap();
     assert_eq!(metadata.revision, Revision(6));
     assert_eq!(metadata.project_id, project_id());
-    assert_eq!(metadata.schema_version, 1);
+    assert_eq!(
+        metadata.schema_version,
+        anim_project::document::PROJECT_SCHEMA_VERSION
+    );
     assert_eq!(
         metadata.manifest_digest,
         anim_assets::manifest_digest(&document.assets).unwrap(),
@@ -562,7 +630,7 @@ fn the_committed_schema_matches_what_the_serializers_write() {
         .expect("workspace root")
         .join("schemas")
         .join("project")
-        .join("v1.json");
+        .join("v2.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is versioned and must be readable: {e}", path.display()));
     let schema_document: Value = serde_json::from_str(&text).unwrap();
@@ -614,6 +682,36 @@ fn the_committed_schema_matches_what_the_serializers_write() {
             &serde_json::to_value(marker).unwrap(),
         );
     }
+    for event in scene.events() {
+        check(
+            &schema_document,
+            "event_definition",
+            &serde_json::to_value(event).unwrap(),
+        );
+    }
+    // The two new definitions the version bump exists for. `check` compares a required
+    // list against a serialized object, and an `Easing` is a string or an object
+    // depending on the variant, so the easing spelling is asserted directly instead.
+    assert!(
+        defs.contains_key("easing_curve"),
+        "the schema describes the curve the Rust type can now hold"
+    );
+    assert!(defs.contains_key("event_kind"));
+    assert!(
+        serde_json::to_value(Easing::Linear).unwrap() == "linear",
+        "a unit variant stays a bare name, which is the spelling its canonical tag uses"
+    );
+    let curve = serde_json::to_value(Easing::Curve(
+        anim_project::EasingCurve::new([
+            anim_core::rational::Rational::from_i128(0),
+            anim_core::rational::Rational::new(1, 4).unwrap(),
+            anim_core::rational::Rational::from_i128(1),
+        ])
+        .unwrap(),
+    ))
+    .unwrap();
+    check(&schema_document, "easing_curve", &curve["curve"]);
+    assert!(curve["curve"]["points"].is_array());
     let record = document.assets.iter().next().unwrap();
     check(
         &schema_document,

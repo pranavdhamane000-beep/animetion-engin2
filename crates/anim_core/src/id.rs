@@ -1,10 +1,11 @@
 //! Typed stable identifiers and document revisions (spec 10.8).
 //!
-//! Seven ID types, one per referenced object class. They are separate types
+//! Eight ID types, one per referenced object class. They are separate types
 //! rather than one `Id` wrapper because the spec's error taxonomy and diagnostics
 //! name them individually — an `AssetId` where a `NodeId` was expected is a bug in
 //! the caller, and a type system that accepts it silently would move that bug into
-//! the data.
+//! the data. Spec 10.8 lists seven; the eighth, [`EventOccurrenceId`], is named by
+//! spec 13.7 and 13.8 and is recorded as a deviation.
 //!
 //! Identity is *created once and copied*, never regenerated: spec 10.8 says IDs
 //! are "generated once at creation and copied through save/load, undo and
@@ -44,7 +45,7 @@ fn parse_canonical_uuid(raw: &str) -> Result<Uuid, CoreError> {
 
 /// Define one typed identifier over a UUID.
 ///
-/// A macro rather than seven copies because the bodies are required to be
+/// A macro rather than one copy per type because the bodies are required to be
 /// identical: any drift between how `SceneId` and `NodeId` parse, order or
 /// serialize would be a silent asymmetry in the one thing every package trusts.
 macro_rules! typed_id {
@@ -189,6 +190,22 @@ typed_id!(
     /// occurrence_index)`, and that derivation lives with the event log in WP04, not
     /// here.
     EventDefinitionId, "event_definition");
+typed_id!(
+    /// Identity of one firing of one event definition, derived by
+    /// `anim_scene::events` from `(EventDefinitionId, occurrence_index)` (spec 13.7).
+    /// This is the value spec 13.8 puts first in `SceneEvent`, and it is a
+    /// `SceneEvent`'s only identity: the snapshot holds no mutable state an event
+    /// could be found by instead.
+    ///
+    /// Spec 10.8's list stops at seven ids and does not name this one; 13.7 and 13.8
+    /// do, so it is recorded as a deviation rather than treated as an invention. It
+    /// belongs here rather than in WP04 because every rule that makes an identity
+    /// safe — the strict canonical parse, the 16-byte `Ord`, the shared `Serialize`
+    /// — is owned by this macro, and `typed_id!` is private to this file. Any other
+    /// home would have to export the macro, which changes this crate anyway, or
+    /// re-implement those rules a second time, which is the asymmetry this file's
+    /// module comment exists to prevent.
+    EventOccurrenceId, "event_occurrence");
 
 /// A monotonically increasing document revision.
 ///
@@ -315,7 +332,7 @@ mod tests {
     fn distinct_id_types_do_not_substitute() {
         let raw = fixture("same-bytes");
         // Compilable only as separate types; this asserts the values are equal
-        // while the types are not, which is the point of the seven wrappers.
+        // while the types are not, which is the point of the separate wrappers.
         let scene = SceneId::from_uuid(raw);
         let track = TrackId::from_uuid(raw);
         assert_eq!(scene.uuid(), track.uuid());
@@ -323,6 +340,57 @@ mod tests {
         assert_eq!(TrackId::kind(&track), "track");
         fn takes_scene(_: SceneId) {}
         takes_scene(scene);
+    }
+
+    #[test]
+    fn every_id_kind_label_is_unique_and_covers_the_eight_types() {
+        // `kind` is what a diagnostic says when it reports which identity it found, so
+        // two types sharing one label would make a report unfilterable — the exact
+        // failure spec 7.4's machine-selectable categories exist to avoid. The list
+        // below is the registry: adding a ninth id type without a line here fails.
+        let raw = fixture("one-bytes");
+        let labels = [
+            ProjectId::kind(&ProjectId::from_uuid(raw)),
+            SceneId::kind(&SceneId::from_uuid(raw)),
+            NodeId::kind(&NodeId::from_uuid(raw)),
+            TrackId::kind(&TrackId::from_uuid(raw)),
+            AssetId::kind(&AssetId::from_uuid(raw)),
+            CommandId::kind(&CommandId::from_uuid(raw)),
+            EventDefinitionId::kind(&EventDefinitionId::from_uuid(raw)),
+            EventOccurrenceId::kind(&EventOccurrenceId::from_uuid(raw)),
+        ];
+        let mut sorted: Vec<&'static str> = labels.into_iter().collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            labels.len(),
+            "two id types share a label: {labels:?}"
+        );
+        assert_eq!(labels.len(), 8, "an id type was added or removed here");
+    }
+
+    #[test]
+    fn an_occurrence_id_is_strict_about_spelling_and_orders_by_bytes() {
+        // WP04 sorts `SceneEvent` by a key whose last term is this id, and 13.7 pins
+        // the comparison to the 16 bytes, so the ordering rule is load-bearing in an
+        // event log and not only in a manifest.
+        let low = EventOccurrenceId::from_uuid(Uuid::from_bytes([0x00; 16]));
+        let high = EventOccurrenceId::from_uuid(Uuid::from_bytes([0xff; 16]));
+        assert!(low < high);
+        let text = high.to_canonical_string();
+        assert_eq!(EventOccurrenceId::parse(&text).unwrap(), high);
+        assert!(
+            EventOccurrenceId::parse(&text.to_uppercase()).is_err(),
+            "an uppercase spelling is a second spelling of one id"
+        );
+        let json = serde_json::to_string(&high).unwrap();
+        assert_eq!(json, format!("\"{text}\""));
+        assert_eq!(
+            serde_json::from_str::<EventOccurrenceId>(&json).unwrap(),
+            high,
+            "a quoted canonical id must load"
+        );
     }
 
     #[test]

@@ -1192,6 +1192,186 @@ and the rename.
 
 ---
 
+## 2026-11-06 (WP04)
+
+### #33 — WP04 — the four deferred questions, settled before `evaluator.rs` was written
+
+`BUILD_STATE.md` said WP04's first decision must be put to the user and not settled inside
+the evaluator. It was, as one bundled four-question dialog, after a spec-wide survey for
+which later packages name real curve types. The survey result is the reason three of the
+answers are what they are, so it is recorded first.
+
+**Survey.** No section of the spec enumerates easing variants — not once in 5 400 lines.
+Curve types are *named* by later packages and never *defined* by any of them:
+`Curve<Rational>` (30.8), `SpeedRampCurve` (32.8), `EaseKind` (41.8, never enumerated),
+`SetVfxIntensityCurve` (29.5). The named algorithms are centripetal Catmull-Rom and
+pre/post extrapolation (30.7, 30.12), "a cubic or table-based ramp" (32.7), "fixed easing
+tables" (32.5). Bézier, per-key in/out handles, `EaseIn`/`EaseOut`/`SmoothStep` and
+`prescale` do not appear anywhere. **The correction that came with it:** the extrapolation
+modes are WP15's, spec section 30 — not WP05's, and not spec section 15, which is WP06's
+renderer. `crates/anim_project/src/property.rs` cited "spec 15" for them and that comment is
+now rewritten; a reader following the old citation would have looked for extrapolation in
+the render graph.
+
+**Ruling 1 — events arrive as raw project data.** `EventDefinition` in a new
+`crates/anim_project/src/event.rs`, held by `SceneData` as a `BTreeMap` keyed by
+`EventDefinitionId`. Chosen over "extend `Marker`" and over "synthesize from tracks". The
+decisive evidence was 28.8: WP13 carries `effect_cue: Option<EventDefinitionId>` and
+`audio_cue: Option<EventDefinitionId>` — later packages reference an authored event
+identity, so the identity needs something to reference. `Marker` stays an annotation with no
+id and no consequences; 13.10 gives events to `anim_sim`, `anim_audio` and `anim_render`,
+and fusing the two would make every note on a timing sheet a side effect. `source` is
+`NodeId`, not `Option<NodeId>`, because 13.8 types `SceneEvent.source_id` as a plain
+`NodeId`.
+
+**Ruling 2 — no animation-layer type, and the claim that motivated it was wrong.**
+`BUILD_STATE.md` pointed at "30's `(priority, MotionLayerId)`" as the model for 13.5 step 3.
+Spec 30 is WP15 and its `MotionLayer` is *camera* motion: its `MotionKind` is `Pan`, `Tilt`,
+`Roll`, `Truck`, `Pedestal`, `Dolly`, `Crane`, `Rail`, `Orbit`, `Zoom`, `WhipPan`, `Shake`,
+`Handheld`. WP12's pose layers (27.5, "blend pose layers using per-bone masks") have no data
+structure at all. There is no scene-animation-layer type anywhere in the document, so 13.5
+step 3 has nothing to be implemented *from*. Deferred, with the seam named at
+`anim_scene::animation::blend_layers`, because 13.12's G3 list contains no layer criterion
+and a layer type invented here moves `PROJECT_SCHEMA_VERSION` a second time for a shape WP12
+or WP15 would replace.
+
+**Ruling 3 — `EventOccurrenceId` goes in `anim_core::id`, as the eighth typed id.**
+Decisive fact, not taste: `typed_id!` is a private `macro_rules!` at `id.rs:50`, whose own
+doc comment states why the bodies must be one implementation. Any other home means either
+exporting the macro — which changes `anim_core` regardless — or hand-writing a second copy
+of the strict parse and the 16-byte `Ord` in the tie-break term of the event ordering.
+Spec 10.8 lists seven ids; this is recorded as a deviation, and the file's module header now
+says eight and names 13.7 and 13.8 as the source.
+
+**Ruling 4 — one parameterized easing variant, and a table rather than a Bézier.**
+`Easing::Curve(EasingCurve)`, where `EasingCurve` holds normalized outputs at equally spaced
+inputs, first pinned to `0/1`, last pinned to `1/1`, length in `[2, 65]`, interior samples
+allowed to overshoot. Why this shape:
+
+- It makes 13.11's `InvalidEasing` and 13.7's "invalid easing parameters" *reachable*, which
+  a two-variant enum could not be, and that was the whole point of the ruling.
+- The spec sanctions it twice — 32.7 "a cubic or table-based ramp", 32.5 "fixed easing
+  tables" — and never once names a curve family.
+- Exactness. The lookup is rational at every step: locate the segment by the table's own
+  spacing rule, take the exact fraction inside it, lerp the two samples. A Bézier needs a
+  root solve, which is either an iterative float method or a polynomial whose denominators
+  cube the frame-position denominators inside `i128`.
+- The endpoint pinning is what keeps 13.7's "At exact key time return that key" true under
+  authored data. Without it a curve can move a key value, and one property would have two
+  values at one instant depending on how the lookup rounded.
+- `EASING_ALGORITHM_VERSION = 1` is a separate number, hashed into a snapshot's pre-image and
+  **not** into the document's. ADR-0005 Decision 4's split, and 42.7's "changing summation
+  technique is an algorithm version change" is the precedent. Authored data does not change
+  when the reading of it changes; two snapshots that differ must not share a hash.
+- Rejected: `EaseIn`/`EaseOut`/`SmoothStep` named variants. The spec never lists any, so the
+  list would be invented, and it would still leave 13.7's invalid-*parameter* clause
+  unproducible.
+
+**Ruling 5 (consequence of 4), and the one that removed code.** `EasingCurve`'s constructor
+validates and its `Deserialize` runs the constructor, so the evaluator's planned re-check of
+the endpoints was **unreachable**. An earlier revision of `properties.rs` carried that check
+plus a test that fed a bad table through JSON to reach it; the test failed because the loader
+refused first, which is the correct behaviour. Both were deleted. 13.11's easing failure
+remains reachable where the type genuinely cannot see it — the two halves are authored in two
+different objects, a key's value type and that key's easing — so `interpolate` raises it for a
+non-`Step` easing on a bool, a label or an asset, and that is tested.
+
+**Ruling 6 (consequence of 1), the schema bump done properly.** `PROJECT_SCHEMA_VERSION` 1
+to 2, one real step in `migrate::chain()` (`V1_TO_V2`, which adds an empty `events` map per
+scene and is idempotent), the committed `tests/fixtures/project_v1.anim.json`, and
+`schemas/project/v2.json` generated from v1 rather than retyped, with v1 kept because the
+files it describes still exist. `DOCUMENT_DOMAIN` stays `anim_engine/document/v1`: appending
+a section to an unchanged framing is a field addition, not a byte-layout change. No
+`serde(default)` on `events`, which is what forces every version 1 load through the chain
+rather than quietly reading an old file as a new one.
+
+**Ruling 7, not asked and therefore recorded here.** 13.12 tests "camera cuts" and "audio cue
+identity", and there is no authored camera or audio-cue structure — the same class of gap as
+the layers, one the four questions did not cover. Resolved minimally: an `EvaluatedCamera` is
+a node that a `CameraCut` event names, and an `AudioCue` is an `AudioCue` event carrying its
+source node's evaluated asset. Both come from the event collection ruling 1 added, so no
+third authored collection was created. WP15's rig (30.8) will extend these types.
+
+### #34 — WP04 — G3 result summary, and what the tests caught
+
+G3 is WP04 and it is self-certifiable under #21, so this is the record that says it passed.
+`tools\ci.cmd` on 2026-11-06: **fmt PASS, clippy PASS, test PASS** — 431 tests across the
+workspace, against 313 before this package. 13.12's thirteen clauses are each named by a test
+in `crates/anim_scene/tests/evaluation.rs` except "identical canonical snapshots and event
+logs from two fresh processes", which is
+`crates/anim_test_support/tests/wp04_isolation.rs` running the `wp04_snapshot` scenario twice.
+
+**Four defects the tests found, all of them introduced by this package, all found before
+this file was written.**
+
+1. **`f64::sin_cos()` returns `(sin, cos)`, and it was destructured as `(cos, sin)`.** Every
+   node that authored no rotation got a quarter turn: the identity became
+   `[[0, -1, 0], [1, 0, 0], [0, 0, 1]]`. The failure was finite and plausible, which is why
+   the comment now names the order at the call site. Caught by
+   `an_untouched_node_is_visible_opaque_and_at_the_origin`, which asserts that an untouched
+   node's matrix *is* the identity — the only test in the crate that could see it.
+2. **A child's local matrix was composed twice.** `hierarchy::visit` returns world matrices,
+   and `evaluate_node` composed the authored local onto that result instead of onto the
+   parent's, so x = 1 under a parent at x = 10 became 12. `evaluate_node` now takes the
+   parent's matrix, and the test asserts both the number and that the two passes agree.
+3. **Four hand-computed expectations were wrong while the code was right**, which is the case
+   the oracle rule exists for and the reason it was kept rather than relaxed. One and a half
+   frames of a `0..4` interval is `u = 3/8`, not `3/4`; a quarter of the way into a
+   four-frame rise is `1/16`, not `1/4`; four frames at `30000/1001` is `1001/7500` and a
+   digit was mistyped as `40004/30000`; and the pair mirrored about an interval's midpoint is
+   `1.5` and `2.5`, not `1.5` and `3.5`. Each was corrected against the specification's
+   arithmetic, never against the implementation's output.
+4. **Five `unwrap()`s on `Option` returns and two `Arc<[T]>`-against-`T` comparisons.**
+   `ProjectDocument::insert_scene` hands back what it displaced, so a fresh insert returns
+   `None` and the fixture panicked in a way that read like an evaluation failure. One of them
+   sat in the negative-control test, where a panic would have hidden the fact that the
+   scenario could not tell two documents apart.
+
+**Three more, caught by reading the diff rather than by a failing test** — which is worth
+recording separately, because a defect this package's own suite cannot find is a defect the
+next package's suite will not find either:
+
+5. **`SceneError::InvalidEasing` and `InvalidPropertyKeys` were leaving `anim_scene` with
+   blank `node` and `property` fields.** `properties.rs` is about values, and a value does
+   not know whose it is, so every refusal raised there named nothing while looking perfectly
+   well-formed in the type. `PropertySources::value` is the one place that knows both, and it
+   now calls `properties::with_subject` on the way out. `a_key_list_refusal_names_the_node_and
+   _the_property_it_broke` is the test that would have caught it had it been written first.
+6. **The evaluator reported a missing *node* as `SceneError::MissingScene`.** That is not a
+   smaller version of the right error, it is a wrong category: 13.8's `EvaluatedNode` names a
+   `NodeId`, and 13.11 has no variant meaning "the hierarchy produced an id the scene does
+   not contain" because that is not a document defect but a bug in `hierarchy::visit`. Fixed
+   structurally rather than by inventing a tenth variant — `WorldEntry` now carries the index
+   of the node it came from, so the pairing is total and the impossible branch does not
+   exist. `entry.parent`'s world lookup keeps a report, and it is `HierarchyCycle`, which is
+   what an unvisited parent actually means here; it replaced an `unwrap_or(IDENTITY)` that
+   would have drawn a child under a parent the hierarchy never placed.
+7. **Four public items were declared against consumers that do not exist** —
+   `evaluator::ActiveCamera`, `camera::no_cameras`, `animation::unauthored_local`,
+   `SceneError::is_arithmetic` — and `SceneError::EventOrderOverflow` was being described in
+   this crate's own module comment as reachable when nothing can reach it. The first four are
+   deleted. The claim about the fifth is corrected in `lib.rs`, in `ADR-0007` consequence 6,
+   in risk 19 and in deviation 14, because *a declared error variant reads like covered error
+   handling to the next session*, and that is the same class of false assurance as a stub that
+   compiles.
+
+
+**What the package removed.** An `ActiveCamera` alias in `evaluator.rs`, a `no_cameras()`
+constant in `camera.rs`, an `unauthored_local()` re-export in `animation.rs`, and
+`SceneError::is_arithmetic`. Each was written against a consumer that turned out not to
+exist; deleting them is the cheaper correction than leaving a public surface with no caller.
+
+**The residual G3 does not cover.** `SceneError::EventOrderOverflow` is declared because
+13.11 lists it, and **no test reaches it**: with one authored position per definition, the
+ordering path's only arithmetic is a constant zero index and a literal domain tag. Eight of
+the nine variants have a producing test; this is the ninth. It becomes reachable when WP14
+gives an event something to repeat. `BUILD_STATE.md` carries it as an open item so that a
+later session does not read a declared variant as coverage.
+
+**Also owed, also delivered:** `docs/adr/ADR-0007-event-phases-occurrence-identity-and-tie-ordering.md`,
+which spec 24's register closes at WP04 — the occurrence-identity derivation, the
+frame-ownership rule and the tie ordering, each with its alternatives and its schema impact.
+
 ## Test command
 
 **Use the gate. `tools\ci.cmd` is the single entry point** (DECISIONS.md #19) and it

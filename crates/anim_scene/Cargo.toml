@@ -5,7 +5,35 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 13.4: `anim_scene -> anim_project -> anim_assets -> anim_core`, and nothing else.
+# No `wgpu`, no `egui`, no `cpal`, no FFmpeg: 13.4 states the prohibition because the
+# evaluator is the one component every consumer shares — simulation, render, audio, editor
+# and export all read the same snapshot — so a graphics or audio dependency here would put
+# a device behind the deterministic answer. `serde` is absent on the same reasoning: a
+# snapshot is computed from a document and hashed from its canonical byte stream, and it is
+# never persisted, so giving it a JSON form would create a second encoding of state whose
+# identity is supposed to come from exactly one.
+#
+# `uuid` is the one addition beyond the workspace chain, and it is not a new dependency in
+# the sense spec 3.2 cares about: it is already a public dependency of `anim_core`, whose
+# typed ids are `pub struct X(pub Uuid)`, so any crate that names an id type already links
+# it. Spec 13.7 requires occurrence identities to be *derived*, and `derive` takes a
+# namespace value of that type.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_project = { path = "../anim_project" }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Test fixtures only, already in the lock, exactly as `anim_project`'s are.
+uuid = { workspace = true }
+# `serde_json` appears in tests for one reason: the easing table's endpoint rule is the
+# condition spec 13.11 calls `InvalidEasing`, and the only way to hold a table that
+# violates it is to arrive from a form the constructor never saw. A dev-dependency is
+# enough for that, and spec 5.1's rule — that these stay out of the library graph — is
+# what the absence of `serde` from `[dependencies]` above keeps honest.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

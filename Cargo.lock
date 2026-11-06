@@ -104,6 +104,13 @@ version = "0.0.0"
 [[package]]
 name = "anim_scene"
 version = "0.0.0"
+dependencies = [
+ "anim_core",
+ "anim_project",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "anim_sim"
@@ -116,6 +123,7 @@ dependencies = [
  "anim_assets",
  "anim_core",
  "anim_project",
+ "anim_scene",
  "anyhow",
  "ash",
  "blake3",

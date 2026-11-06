@@ -7,3 +7,4 @@
 
 pub mod probe;
 pub mod probe_tools;
+pub mod wp04_fixture;

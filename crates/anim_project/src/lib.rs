@@ -11,8 +11,13 @@
 //! Spec 12.3 lists seven files and no `error.rs`, so [`ProjectError`] lives at the
 //! crate root — the same resolution `anim_assets` reached for `AssetError`
 //! (DECISIONS.md #29) rather than a second precedent for the same shape.
+//!
+//! [`event`] is the eighth file, added by WP04: spec 13.5 step 1 validates event
+//! definitions and 13.7 orders their occurrences by authored fields, and no file 12.3
+//! or 13.3 owns that data. Recorded as a deviation row in `BUILD_STATE.md`.
 
 pub mod document;
+pub mod event;
 pub mod migrate;
 pub mod property;
 pub mod recovery;
@@ -20,14 +25,22 @@ pub mod save;
 pub mod scene;
 pub mod schema;
 
-pub use anim_assets::{AssetKind, AssetManifest, AssetManifestEntry, MANIFEST_SCHEMA_VERSION};
+pub use anim_assets::{
+    AssetKind, AssetManifest, AssetManifestEntry, ContentHash, MANIFEST_SCHEMA_VERSION,
+};
 use anim_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 use anim_core::error::CoreError;
-pub use anim_core::id::{AssetId, NodeId, Revision, SceneId, TrackId};
+pub use anim_core::id::{
+    AssetId, EventDefinitionId, EventOccurrenceId, NodeId, Revision, SceneId, TrackId,
+};
 pub use anim_core::time::{FramePos, FrameRate};
 
 pub use document::ProjectDocument;
-pub use property::{Easing, PropertyCurve, PropertyKey, PropertyPath, PropertyValue};
+pub use event::{EventDefinition, EventKind};
+pub use property::{
+    Easing, EasingCurve, PropertyCurve, PropertyKey, PropertyPath, PropertyValue,
+    EASING_ALGORITHM_VERSION, EASING_CURVE_MAX_POINTS,
+};
 pub use scene::{Marker, NodeData, SceneData, TrackData};
 
 /// The domain separator for the document's own canonical byte stream (ADR-0004

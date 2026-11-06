@@ -106,14 +106,49 @@ fn invalid_path(raw: &str, why: &str) -> ProjectError {
     }
 }
 
+/// The version of the numeric algorithm that turns an [`EasingCurve`] table plus one
+/// exact interval fraction into one eased fraction.
+///
+/// Spec 13.7 requires "a versioned numeric algorithm" and WP15's own track sampler
+/// repeats the phrase (spec 30.7), so the version has to be a number a snapshot can
+/// carry rather than a fact about whichever build produced it. It moves when the
+/// *arithmetic* moves, not when a field is added — the same split ADR-0005 Decision 4
+/// keeps between an encoding version and a data version.
+///
+/// It is recorded here and hashed into a snapshot's pre-image by
+/// `anim_scene::snapshot::snapshot_hash`, and deliberately not into the document's:
+/// authored data does not change when the interpretation of it changes, but two
+/// snapshots that differ must not share a hash. WP20 states the same rule for a
+/// summation technique (spec 41.7's "changing summation technique is an algorithm
+/// version change"), which is the precedent this constant follows.
+pub const EASING_ALGORITHM_VERSION: u32 = 1;
+
+/// The largest table one [`EasingCurve`] may hold.
+///
+/// A bound rather than an open `Vec` for one arithmetic reason: the lookup multiplies a
+/// fraction whose denominator is already `points.len() - 1` into an interval fraction
+/// whose denominator comes from two rational frame positions, and spec 10.7's exact
+/// arithmetic has to stay inside `i128`. Sixty-five samples is the ceiling that keeps
+/// that product bounded while still being finer than any easing a person authors by
+/// hand; WP15's rail tables are a separate 256-sample mechanism with its own bound
+/// (spec 30.7) and do not read this one.
+pub const EASING_CURVE_MAX_POINTS: usize = 65;
+
 /// How a value is reached from the preceding key.
 ///
-/// Only the two modes spec 13.6 states a rule for. Bezier parameters and extrapolation
-/// modes are named later — `InvalidEasing` in spec 13.11, pre/post extrapolation in
-/// spec 15 — and each of those packages adds its variant with its own validation;
-/// inventing the parameter fields here would author an easing model WP15 has to
-/// replace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `Linear` and `Step` are the two modes spec 13.6 states a rule for. `Curve` is the
+/// parameterized easing spec 13.7 needs in order to say anything at all: 13.11 lists
+/// `InvalidEasing` and 13.7 makes "invalid easing parameters" a validation error, and
+/// neither is a reachable condition while the type has no parameters. The survey that
+/// preceded this found no section anywhere enumerating easing variants — WP15 names
+/// `Curve<Rational>` (30.8), WP17 names `SpeedRampCurve` (32.8) and "a cubic or
+/// table-based ramp" (32.7), and WP19 names `EaseKind` (41.8), all without defining
+/// any of them — so this is the first easing model in the project and those packages
+/// extend it rather than replace it. What they extend it *with* is what is absent from
+/// the spec: no package asks for per-key Bézier handles, so a table of normalized
+/// outputs stays the shape that satisfies 32.7's "cubic or table-based" alternative
+/// without inventing a handle-authoring model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Easing {
     /// Interpolate linearly to the next key.
@@ -121,27 +156,208 @@ pub enum Easing {
     /// Hold this key's value until the next key. Spec 13.6: "Step properties select the
     /// preceding key."
     Step,
+    /// Reshape the interval fraction through an authored table.
+    Curve(EasingCurve),
 }
 
 impl Easing {
-    /// The persisted and hashed spelling: the lowercase name JSON already writes, so
-    /// that no table sits between the two (ADR-0005 Decision 5's rule).
+    /// The canonical tag: the lowercase name JSON already writes for the unit variants,
+    /// so that no table sits between the two (ADR-0005 Decision 5's rule). `Curve`
+    /// carries its parameters after this tag, exactly as `PropertyValue` does.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Linear => "linear",
             Self::Step => "step",
+            Self::Curve(_) => "curve",
         }
     }
 
-    pub(crate) fn encode(self, cp: &mut CanonicalBytes) {
+    pub(crate) fn encode(&self, cp: &mut CanonicalBytes) {
         cp.text(self.as_str());
+        if let Self::Curve(curve) = self {
+            curve.encode(cp);
+        }
     }
 }
 
 impl std::fmt::Display for Easing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        match self {
+            Self::Curve(curve) => write!(f, "curve({})", curve.points.len()),
+            other => f.write_str(other.as_str()),
+        }
+    }
+}
+
+/// An authored easing table: normalized output values at equally spaced input positions.
+///
+/// `points[i]` is the eased fraction at input `i / (len - 1)`, so the samples are
+/// exactly spaced and the lookup is exact rational arithmetic. Spec 13.7 asks for "a
+/// versioned numeric algorithm" rather than for one particular curve family, and a
+/// table is the one form the spec sanctions twice — 32.7's "a cubic or table-based
+/// ramp" and 32.5's "fixed easing tables" — while needing no transcendental step whose
+/// reproducibility would rest on whichever libm the toolchain happens to call.
+///
+/// The first and last values are pinned to `0/1` and `1/1`. That is what makes an
+/// authored curve safe rather than merely expressible: it guarantees the eased fraction
+/// is `u = 0` at the preceding key and `u = 1` at the following one, so a curve can
+/// reshape the motion *between* two keys without ever displacing either of them. Without
+/// that rule the spec's own interpolation text — "At exact key time return that key" —
+/// would be contradicted by authored data, and one property would have two values at one
+/// instant depending on how the lookup rounds.
+///
+/// `points` is private and its `Deserialize` is hand-written for the ordinary reason
+/// (DECISIONS.md #22, applied to spec 10.8's normalization rule): the invariant needs
+/// validation, and a derived impl would fill the field without asking.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EasingCurve {
+    points: Vec<Rational>,
+}
+
+impl EasingCurve {
+    /// Build a curve from its sample values, validating them.
+    ///
+    /// The rules are the ones a curve has to satisfy to be a function of the interval at
+    /// all, and each refuses a distinct authored mistake:
+    ///
+    /// - at least two points, because one value is a constant, not a mapping;
+    /// - at most [`EASING_CURVE_MAX_POINTS`], for the `i128` bound stated there;
+    /// - the first sample exactly `0/1` and the last exactly `1/1`, so the curve cannot
+    ///   move an authored key value.
+    ///
+    /// Interior samples are *not* clamped to `[0, 1]`. Overshoot is the point of several
+    /// of the easings later packages ask for — WP17's "dolly zoom" and WP20's
+    /// anticipation/recovery motion both need a fraction that leaves the range and comes
+    /// back — and a rule against it would forbid authored behaviour the spec wants.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectError::Validation`] naming which rule broke. This is the condition spec
+    /// 13.11 calls `InvalidEasing` and spec 13.7 calls "invalid easing parameters"; at
+    /// this layer it arrives as a project validation error, because validation errors
+    /// belong to the type that owns the field (spec 12.11), and `anim_scene` re-raises
+    /// it as its own typed variant for the context-dependent case that the type cannot
+    /// see. See [`crate::scene`]`'s` module comment.
+    pub fn new(points: impl IntoIterator<Item = Rational>) -> Result<Self> {
+        let values: Vec<Rational> = points.into_iter().collect();
+        if values.len() < 2 {
+            return Err(Self::rejected(
+                &values,
+                "an easing table needs at least two samples; one value maps nothing",
+            ));
+        }
+        if values.len() > EASING_CURVE_MAX_POINTS {
+            return Err(Self::rejected(
+                &values,
+                "an easing table holds at most EASING_CURVE_MAX_POINTS samples, so that the \
+                 exact fraction arithmetic that reads it cannot overflow its width",
+            ));
+        }
+        if values[0] != Rational::from_i128(0) {
+            return Err(Self::rejected(
+                &values,
+                "the first sample must be 0/1, or the curve would move the value of the key \
+                 it eases away from",
+            ));
+        }
+        if values[values.len() - 1] != Rational::from_i128(1) {
+            return Err(Self::rejected(
+                &values,
+                "the last sample must be 1/1, or the curve would not arrive at the value of \
+                 the key it eases toward",
+            ));
+        }
+        Ok(Self { points: values })
+    }
+
+    /// The samples, in input order.
+    #[must_use]
+    pub fn points(&self) -> &[Rational] {
+        &self.points
+    }
+
+    /// The samples as a fixed spacing: sample `i` sits at input `i / (len - 1)`.
+    ///
+    /// Exposed because the spacing rule is what makes the table interpretable, and a
+    /// caller that had to re-derive `len - 1` would be re-deriving a validation rule
+    /// rather than reading data.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectError::Validation`] if `index` is not a sample of this curve, and
+    /// [`ProjectError::Core`] if the ratio cannot be represented — neither is reachable
+    /// for a curve built through [`EasingCurve::new`], whose length bound is what makes
+    /// the arithmetic safe.
+    pub fn position_of(&self, index: usize) -> Result<Rational> {
+        if index >= self.points.len() {
+            return Err(ProjectError::Validation {
+                location: format!("easing sample {index}"),
+                detail: format!(
+                    "is outside this curve, which has {} samples numbered from 0",
+                    self.points.len()
+                ),
+            });
+        }
+        let last = i128::try_from(self.points.len() - 1).map_err(|e| ProjectError::Validation {
+            location: "easing curve length".to_string(),
+            detail: format!("does not fit the width its arithmetic uses: {e}"),
+        })?;
+        let i = i128::try_from(index).map_err(|e| ProjectError::Validation {
+            location: format!("easing sample {index}"),
+            detail: format!("does not fit the width its arithmetic uses: {e}"),
+        })?;
+        Ok(Rational::new(i, last)?)
+    }
+
+    fn rejected(values: &[Rational], why: &str) -> ProjectError {
+        ProjectError::Validation {
+            location: format!(
+                "easing curve with {} samples [{}]",
+                values.len(),
+                values
+                    .iter()
+                    .map(Rational::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            detail: format!("invalid easing parameters: {why}"),
+        }
+    }
+
+    pub(crate) fn encode(&self, cp: &mut CanonicalBytes) {
+        cp.u64(self.points.len() as u64);
+        for point in &self.points {
+            cp.rational(point);
+        }
+    }
+}
+
+impl Serialize for EasingCurve {
+    /// Derived-in-shape but hand-written, so the member name is spelled once and
+    /// [`EasingCurve`]’s JSON is the same object whether it arrives inside an `Easing`
+    /// or on its own.
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EasingCurve", 1)?;
+        state.serialize_field("points", &self.points)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EasingCurve {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct RawCurve {
+            points: Vec<Rational>,
+        }
+        let raw = RawCurve::deserialize(deserializer)?;
+        Self::new(raw.points).map_err(serde::de::Error::custom)
     }
 }
 
@@ -409,6 +625,11 @@ mod tests {
         )
     }
 
+    /// A rational, spelled `num/den`, for the curve tests.
+    fn r(num: i128, den: i128) -> Rational {
+        Rational::new(num, den).unwrap()
+    }
+
     #[test]
     fn path_rules_accept_canonical_names_and_reject_two_spellings_of_one_key() {
         assert_eq!(
@@ -512,6 +733,90 @@ mod tests {
         let mut cp_false = CanonicalBytes::new();
         PropertyCurve::with_default(Some(PropertyValue::Bool(false))).encode(&mut cp_false);
         assert_ne!(cp_none.as_slice(), cp_false.as_slice());
+    }
+
+    #[test]
+    fn an_easing_curve_that_does_not_start_at_zero_or_end_at_one_is_refused() {
+        // These two rules are what keep a curve from displacing an authored key value,
+        // so they are what spec 13.7's "invalid easing parameters" and spec 13.11's
+        // `InvalidEasing` are about. Each row breaks exactly one rule.
+        for bad in [
+            vec![],
+            vec![r(0, 1)],
+            vec![r(0, 1), r(0, 1)],
+            vec![r(1, 1), r(1, 1)],
+            vec![r(0, 1), r(2, 1)],
+            vec![r(0, 1), r(5, 4), r(3, 2)],
+        ] {
+            let Err(ProjectError::Validation { detail, .. }) = EasingCurve::new(bad.clone()) else {
+                panic!("{bad:?} must be refused as invalid easing parameters, not accepted");
+            };
+            assert!(detail.contains("invalid easing parameters"), "{detail}");
+        }
+        // And the legal shapes are accepted, including an overshoot, which is what
+        // WP17's dolly zoom and WP20's anticipation need.
+        assert!(EasingCurve::new([r(0, 1), r(1, 1)]).is_ok());
+        assert!(EasingCurve::new([r(0, 1), r(5, 4), r(1, 1)]).is_ok());
+    }
+
+    #[test]
+    fn an_easing_curve_over_the_sample_ceiling_is_refused_by_the_bound_not_by_luck() {
+        let mut too_many: Vec<Rational> = (0..EASING_CURVE_MAX_POINTS)
+            .map(|i| Rational::new(i128::try_from(i).unwrap(), 100).unwrap())
+            .collect();
+        too_many.push(Rational::from_i128(1));
+        assert_eq!(too_many.len(), EASING_CURVE_MAX_POINTS + 1);
+        assert!(matches!(
+            EasingCurve::new(too_many),
+            Err(ProjectError::Validation { .. })
+        ));
+    }
+
+    #[test]
+    fn curve_samples_are_equally_spaced_over_the_unit_interval() {
+        // The lookup in `anim_scene::properties` is only exact because of this rule, and
+        // the rule lives with the data rather than with the reader.
+        let curve = EasingCurve::new([r(0, 1), r(1, 2), r(1, 1)]).unwrap();
+        assert_eq!(curve.position_of(0).unwrap(), Rational::from_i128(0));
+        assert_eq!(curve.position_of(1).unwrap(), Rational::new(1, 2).unwrap());
+        assert_eq!(curve.position_of(2).unwrap(), Rational::from_i128(1));
+        assert!(
+            curve.position_of(3).is_err(),
+            "one past the table is not a sample"
+        );
+    }
+
+    #[test]
+    fn a_curve_easing_is_one_object_in_json_and_carries_its_table_in_bytes() {
+        let easing = Easing::Curve(EasingCurve::new([r(0, 1), r(1, 2), r(1, 1)]).unwrap());
+        let text = serde_json::to_string(&easing).unwrap();
+        assert_eq!(
+            text, r#"{"curve":{"points":["0/1","1/2","1/1"]}}"#,
+            "the struct variant spells itself as tag plus payload, the same shape \
+             PropertyValue uses"
+        );
+        let loaded: Easing = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded, easing);
+        assert!(
+            serde_json::from_str::<Easing>(r#"{"curve":{"points":["0/1","0/1"]}}"#).is_err(),
+            "a table that does not arrive at 1/1 must not load from a file either"
+        );
+
+        let mut with_table = CanonicalBytes::new();
+        easing.encode(&mut with_table);
+        let mut linear = CanonicalBytes::new();
+        Easing::Linear.encode(&mut linear);
+        assert_eq!(
+            &with_table.as_slice()[..13],
+            &[5, 0, 0, 0, 0, 0, 0, 0, b'c', b'u', b'r', b'v', b'e'],
+            "the tag is the lowercase name JSON writes, length-prefixed little-endian, \
+             and the table follows it"
+        );
+        assert_ne!(
+            with_table.as_slice(),
+            linear.as_slice(),
+            "a curve is not the same bytes as its tag alone"
+        );
     }
 
     #[test]

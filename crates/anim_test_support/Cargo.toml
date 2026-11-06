@@ -13,6 +13,13 @@ anim_core = { path = "../anim_core" }
 # dependency edges and no new crate. DECISIONS.md #31.
 anim_assets = { path = "../anim_assets" }
 anim_project = { path = "../anim_project" }
+# Added for `wp04_snapshot`, spec 13.12's "identical canonical snapshots and event logs
+# from two fresh processes". Same reasoning and same precedent as `anim_project` above:
+# a claim about processes can only be proven by a process, 4.2 assigns that to this
+# crate, and the crate the claim is about has to be linkable from here. The edge is
+# downward through the chain spec 13.4 already draws (`anim_scene -> anim_project`), so
+# no package that spec forbids becomes reachable.
+anim_scene = { path = "../anim_scene" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

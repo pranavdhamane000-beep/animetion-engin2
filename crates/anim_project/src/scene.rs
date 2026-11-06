@@ -1,4 +1,4 @@
-//! Raw scenes, nodes, tracks and markers (spec 12.3).
+//! Raw scenes, nodes, tracks, markers and event definitions (spec 12.3, 13.5 step 1).
 //!
 //! This is authored data, not evaluated data. Spec 13.2 states the division: WP04's
 //! snapshots are built *from* what is here, and "no downstream system may read mutable
@@ -20,10 +20,11 @@
 use std::collections::BTreeMap;
 
 use anim_core::hash::CanonicalBytes;
-use anim_core::id::{NodeId, TrackId};
+use anim_core::id::{EventDefinitionId, NodeId, TrackId};
 use anim_core::time::FramePos;
 use serde::{Deserialize, Serialize};
 
+use crate::event::EventDefinition;
 use crate::property::{PropertyCurve, PropertyKey, PropertyPath, PropertyValue};
 use crate::{ProjectError, Result};
 
@@ -184,7 +185,14 @@ impl Marker {
     }
 }
 
-/// One scene: a hierarchy, its property tracks, and its markers.
+/// One scene: a hierarchy, its property tracks, its markers, and its events.
+///
+/// Every collection is a `BTreeMap` keyed by the type's own stable id, so the order a
+/// scene serializes in is a property of the ids rather than of the sequence an operator
+/// worked in — the same reason `nodes` and `tracks` are keyed this way, and the reason
+/// spec 13.7 can name `NodeId` order as the root visit order at all. `markers` is the
+/// exception, and stays one: a marker has no id (spec 10.8 lists no `MarkerId`), so its
+/// order is the `(position, label)` pair it is unique in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SceneData {
     /// Non-empty, validated: an unnamed scene cannot be reported on.
@@ -194,6 +202,7 @@ pub struct SceneData {
     /// Sorted by `(position, label)` and unique in that pair, which is why this is
     /// private (DECISIONS.md #22's reading of spec 10.8's normalization rule).
     markers: Vec<Marker>,
+    events: BTreeMap<EventDefinitionId, EventDefinition>,
 }
 
 impl SceneData {
@@ -208,6 +217,7 @@ impl SceneData {
             nodes: BTreeMap::new(),
             tracks: BTreeMap::new(),
             markers: Vec::new(),
+            events: BTreeMap::new(),
         };
         scene.check_name()?;
         Ok(scene)
@@ -230,6 +240,7 @@ impl SceneData {
         nodes: impl IntoIterator<Item = NodeData>,
         tracks: impl IntoIterator<Item = TrackData>,
         markers: impl IntoIterator<Item = Marker>,
+        events: impl IntoIterator<Item = EventDefinition>,
     ) -> Result<Self> {
         let mut marker_list: Vec<Marker> = markers.into_iter().collect();
         marker_list.sort();
@@ -241,6 +252,7 @@ impl SceneData {
                 .map(|track| (track.track_id, track))
                 .collect(),
             markers: marker_list,
+            events: events.into_iter().map(|event| (event.id, event)).collect(),
         };
         scene.validate()?;
         Ok(scene)
@@ -330,6 +342,38 @@ impl SceneData {
         &self.markers
     }
 
+    /// The event definitions, in `EventDefinitionId` order.
+    ///
+    /// Not in event time, and deliberately so: 13.7's occurrence order is a five-term
+    /// key that includes the *derived* `EventOccurrenceId` as its last term, and that
+    /// ordering is evaluation's job. Storage order here only has to be canonical, which
+    /// an id-keyed map gives.
+    pub fn events(&self) -> impl Iterator<Item = &EventDefinition> {
+        self.events.values()
+    }
+
+    #[must_use]
+    pub fn event(&self, event_id: &EventDefinitionId) -> Option<&EventDefinition> {
+        self.events.get(event_id)
+    }
+
+    /// Insert or replace one event definition, returning what it displaced.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectError::Validation`] if `source` names a node this scene does not have.
+    pub fn insert_event(&mut self, event: EventDefinition) -> Result<Option<EventDefinition>> {
+        self.change(|scene| scene.events.insert(event.id, event))
+    }
+
+    /// Remove one event definition, returning it.
+    pub fn remove_event(
+        &mut self,
+        event_id: &EventDefinitionId,
+    ) -> Result<Option<EventDefinition>> {
+        self.change(|scene| scene.events.remove(event_id))
+    }
+
     /// Insert or replace one node, returning what it displaced.
     ///
     /// # Errors
@@ -352,7 +396,8 @@ impl SceneData {
     ///
     /// # Errors
     ///
-    /// [`ProjectError::Validation`] if a child or a track still refers to the node.
+    /// [`ProjectError::Validation`] if a child, a track or an event still refers to the
+    /// node.
     pub fn remove_node(&mut self, node_id: &NodeId) -> Result<Option<NodeData>> {
         if self.nodes.contains_key(node_id) {
             if self
@@ -369,6 +414,14 @@ impl SceneData {
                 return Err(ProjectError::Validation {
                     location: format!("node {node_id}"),
                     detail: "still has a track bound to it; remove the track first".to_string(),
+                });
+            }
+            if self.events.values().any(|event| &event.source == node_id) {
+                return Err(ProjectError::Validation {
+                    location: format!("node {node_id}"),
+                    detail: "still has an event sourced from it; remove the event first, or \
+                             the occurrence would name a node the snapshot cannot evaluate"
+                        .to_string(),
                 });
             }
         }
@@ -419,7 +472,7 @@ impl SceneData {
     /// [`ProjectError::Validation`] naming the first offending object and the rule it
     /// broke: empty name, missing parent, self-parent, a hierarchy cycle, a repeated
     /// sibling order among one parent's children, a track targeting no node, two tracks
-    /// on one property.
+    /// on one property, a repeated marker, an event whose source node is absent.
     pub fn validate(&self) -> Result<()> {
         self.check_name()?;
 
@@ -491,6 +544,12 @@ impl SceneData {
                     location: format!("marker {:?}", pair[0].label),
                     detail: format!("appears twice at frame {}", pair[0].position.frame),
                 });
+            }
+        }
+
+        for event in self.events.values() {
+            if !self.nodes.contains_key(&event.source) {
+                return Err(EventDefinition::missing_source(&event.source));
             }
         }
         Ok(())
@@ -620,6 +679,15 @@ impl SceneData {
         for marker in &self.markers {
             marker.encode(cp);
         }
+        // Last, so the four sections WP03 wrote keep the offsets they had. This is a
+        // field addition and not a layout change, which is why it moves
+        // `PROJECT_SCHEMA_VERSION` and leaves `DOCUMENT_DOMAIN` alone — the framing
+        // rules an existing section is written under are untouched (ADR-0005 Decision
+        // 4's split, and lib.rs's reading of it).
+        cp.u64(self.events.len() as u64);
+        for event in self.events.values() {
+            event.encode(cp);
+        }
     }
 
     /// The record of this scene in ADR-0004's canonical byte layout, with no domain
@@ -637,11 +705,12 @@ impl Serialize for SceneData {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("SceneData", 4)?;
+        let mut state = serializer.serialize_struct("SceneData", 5)?;
         state.serialize_field("name", &self.name)?;
         state.serialize_field("nodes", &self.nodes)?;
         state.serialize_field("tracks", &self.tracks)?;
         state.serialize_field("markers", &self.markers)?;
+        state.serialize_field("events", &self.events)?;
         state.end()
     }
 }
@@ -650,6 +719,13 @@ impl<'de> Deserialize<'de> for SceneData {
     /// Hand-written so a saved scene passes `validate` on the way in: the collections
     /// are private precisely because they hold invariants, and a derived impl would fill
     /// them without asking.
+    ///
+    /// `events` has no `serde(default)`, and that is the migration's teeth. A version 1
+    /// file has no such member, so it cannot be read as version 2 — it has to go through
+    /// `migrate::chain()`, which adds the section and says so by writing
+    /// `schema_version: 2`. Defaulting an absent `events` to empty instead would let a
+    /// version 1 file load as a version 2 document, which is the one mistake a schema
+    /// bump exists to make impossible.
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
@@ -659,6 +735,7 @@ impl<'de> Deserialize<'de> for SceneData {
             nodes: BTreeMap<NodeId, NodeData>,
             tracks: BTreeMap<TrackId, TrackData>,
             markers: Vec<Marker>,
+            events: BTreeMap<EventDefinitionId, EventDefinition>,
         }
         let raw = RawScene::deserialize(deserializer)?;
         Self::from_parts(
@@ -666,6 +743,7 @@ impl<'de> Deserialize<'de> for SceneData {
             raw.nodes.into_values(),
             raw.tracks.into_values(),
             raw.markers,
+            raw.events.into_values(),
         )
         .map_err(serde::de::Error::custom)
     }
@@ -762,7 +840,7 @@ mod tests {
         let parent = node("parent", None, 0);
         let parent_id = parent.node_id;
         let child = node("child", Some("parent"), 0);
-        let built = SceneData::from_parts("shot01", [child, parent], [], []);
+        let built = SceneData::from_parts("shot01", [child, parent], [], [], []);
         let scene = built.expect("a legal graph loads regardless of arrival order");
         assert_eq!(scene.children_of(&parent_id).len(), 1);
     }
@@ -775,7 +853,7 @@ mod tests {
             NodeData::new(a, Some(b), 0, "a"),
             NodeData::new(b, Some(a), 1, "b"),
         ];
-        let rejected = SceneData::from_parts("shot01", nodes, [], []);
+        let rejected = SceneData::from_parts("shot01", nodes, [], [], []);
         assert!(
             matches!(rejected, Err(ProjectError::Validation { .. })),
             "a two-node cycle must be refused at load, not livelock the visitor"

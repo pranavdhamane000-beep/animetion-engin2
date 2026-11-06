@@ -31,7 +31,14 @@ use crate::{ProjectError, Result, Revision};
 /// the manifest, and closing its document half keeps the third separate as well: one
 /// version per thing that changes, because folding them would make an asset-schema bump
 /// look like a byte-layout change and vice versa.
-pub const PROJECT_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 is WP04's, and its one change is the `events` section every scene gained so
+/// that spec 13.5 step 1 has something to validate and 13.7 has authored fields to order.
+/// The step is `migrate::V1_TO_V2` and the version 1 fixture is
+/// `tests/fixtures/project_v1.anim.json`, which together are what the rule above asks
+/// for. `DOCUMENT_DOMAIN` stays at `v1`: appending a section to an unchanged framing is
+/// a field addition, not a byte-layout change.
+pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 /// The authoritative state of one project at one revision.
 ///
@@ -274,7 +281,13 @@ mod tests {
         let json = serde_json::to_value(&document).unwrap();
         assert!(json["assets"]["schema_version"].is_number());
         assert!(json["assets"]["records"].is_object());
-        assert_eq!(json["schema_version"].as_u64(), Some(1));
+        assert_eq!(
+            json["schema_version"].as_u64(),
+            Some(u64::from(PROJECT_SCHEMA_VERSION)),
+            "the document's own version, spelled from the constant rather than as a \
+             literal: this assertion broke on WP04's bump and told us nothing about the \
+             rule it was written to hold"
+        );
     }
 
     #[test]
@@ -351,7 +364,7 @@ mod tests {
         else {
             panic!("a document from a later build must not validate");
         };
-        assert_eq!(found, 2);
+        assert_eq!(found, PROJECT_SCHEMA_VERSION + 1);
         assert_eq!(which, "project document");
         assert_eq!(supported, PROJECT_SCHEMA_VERSION);
     }
