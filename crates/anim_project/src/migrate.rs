@@ -45,16 +45,18 @@ pub struct MigrationStep {
 /// The migration chain from any supported version to
 /// [`PROJECT_SCHEMA_VERSION`].
 ///
-/// One step. Version 1 is WP03's shape and is on disk in every project saved before
-/// WP04, which added the event section spec 13.5 step 1 validates and 13.7 orders. Spec
-/// 12.5's step 9 asks for a step per version pair and a fixture per version, and both now
-/// exist: the step is `V1_TO_V2` and the fixture is
-/// `tests/fixtures/project_v1.anim.json`. What was a test-only mechanism is a real one.
+/// Two steps. Version 1 is WP03's shape and is on disk in every project saved before WP04,
+/// which added the event section spec 13.5 step 1 validates and 13.7 orders. Version 2 is
+/// WP04's and is on disk in every project saved before WP05, which added the simulation
+/// section spec 14.2 makes a prerequisite. Spec 12.5's step 9 asks for a step per version
+/// pair and a fixture per version, and both exist twice over now: `V1_TO_V2` with
+/// `tests/fixtures/project_v1.anim.json`, `V2_TO_V3` with
+/// `tests/fixtures/project_v2.anim.json`.
 pub const fn chain() -> &'static [MigrationStep] {
     CHAIN
 }
 
-const CHAIN: &[MigrationStep] = &[V1_TO_V2];
+const CHAIN: &[MigrationStep] = &[V1_TO_V2, V2_TO_V3];
 
 /// The version 1 to version 2 step.
 ///
@@ -63,11 +65,28 @@ const CHAIN: &[MigrationStep] = &[V1_TO_V2];
 /// 1 shape and must still produce exactly the version 2 shape, and a step written against
 /// the current number would silently change what it claims to read the moment the constant
 /// moves.
+///
+/// It writes the version it *produces*, for the reason [`V0_TO_V1`] gives: in a chain of
+/// more than one step, a step that wrote this build's number would leave an intermediate
+/// document claiming a version it had not yet passed through, and the failure of a later
+/// step would be reported against a file that already looked current. WP04 wrote this line
+/// while version 2 was the end of the chain, so the two were indistinguishable; WP05's step
+/// is what makes the difference observable.
 const V1_TO_V2: MigrationStep = MigrationStep {
     from: 1,
     to: 2,
     description: "v1 to v2: give every scene the `events` section version 1 did not have",
     apply: add_events_section,
+};
+
+/// The version 2 to version 3 step.
+///
+/// Also frozen history, with the same literal ends and the same reason.
+const V2_TO_V3: MigrationStep = MigrationStep {
+    from: 2,
+    to: 3,
+    description: "v2 to v3: add the document-level `simulation` section version 2 did not have",
+    apply: add_simulation_section,
 };
 
 /// Give every scene in a version 1 document the empty event section version 2 requires.
@@ -100,10 +119,39 @@ fn add_events_section(value: &mut Value) -> Result<()> {
             }
         }
     }
-    object.insert(
-        "schema_version".to_string(),
-        Value::from(crate::document::PROJECT_SCHEMA_VERSION),
-    );
+    object.insert("schema_version".to_string(), Value::from(2u32));
+    Ok(())
+}
+
+/// Give a version 2 document the `simulation` section version 3 requires.
+///
+/// The section is one member at document level, and the values it is filled with are
+/// [`crate::simulation::SimulationSettings::for_new_document`]'s: one tick per frame and an
+/// all-zero seed. That is the only filling a version 2 file admits to, because a version 2
+/// project recorded no rate and no seed anywhere — inventing a nonzero seed for a file that
+/// never had one would be 14.11's substituted seed, and inventing a rate would move every
+/// event's `scheduled_tick` in a project whose author never chose one.
+///
+/// Idempotent the way [`add_events_section`] is: a document that already carries the section
+/// keeps it, including a seed an operator wrote by hand before this build existed.
+fn add_simulation_section(value: &mut Value) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| ProjectError::MigrationFailure {
+            from: 2,
+            to: 3,
+            detail: "a version 2 document is not a JSON object, so there is no place to add \
+                 the simulation section"
+                .to_string(),
+        })?;
+    let defaults = crate::simulation::SimulationSettings::for_new_document();
+    object.entry("simulation".to_string()).or_insert_with(|| {
+        serde_json::json!({
+            "ticks_per_frame": defaults.ticks_per_frame,
+            "project_seed": defaults.seed_hex(),
+        })
+    });
+    object.insert("schema_version".to_string(), Value::from(3u32));
     Ok(())
 }
 
@@ -319,15 +367,15 @@ pub fn load_document_with_chain(bytes: &[u8], steps: &[MigrationStep]) -> Result
 /// A test-only chain, from a version 0 that never existed all the way to
 /// [`PROJECT_SCHEMA_VERSION`].
 ///
-/// Two steps now, and the second one is the real one: `V1_TO_V2`. That is deliberate.
-/// While version 1 was the only version this project wrote, the migration machinery
-/// could only be exercised by a synthetic step, and its own doc comment said so. It no
-/// longer has to be: a test that starts at the synthetic version 0 walks the synthetic
-/// rename and then the production step, so `migrate_json`'s multi-step loop, the
-/// "chain finished but reports another version" guard and the real `events` rewrite are
-/// all on the same path a user's version 1 file will take.
+/// Three steps, and the last two are the real ones: `V1_TO_V2` then `V2_TO_V3`. That is
+/// deliberate. A test that starts at the synthetic version 0 walks the synthetic rename and
+/// then both production steps, so `migrate_json`'s multi-step loop, the "chain finished but
+/// reports another version" guard, the real `events` rewrite and the real `simulation`
+/// rewrite are all on the same path a user's version 1 file will take — and with two real
+/// steps in the chain, a step that writes this build's number instead of the version it
+/// produces is now a defect the loop can actually catch rather than a theoretical one.
 #[cfg(test)]
-pub(crate) const TEST_CHAIN: &[MigrationStep] = &[V0_TO_V1, V1_TO_V2];
+pub(crate) const TEST_CHAIN: &[MigrationStep] = &[V0_TO_V1, V1_TO_V2, V2_TO_V3];
 
 /// The synthetic first step. Version 0 is not a shape this project ever wrote; it exists
 /// so that a chain of length two is what the tests run.
@@ -479,23 +527,33 @@ mod tests {
         );
     }
 
-    /// The committed version 1 file, read from the repository.
+    /// A committed file at one schema version, read from the repository.
     ///
     /// Spec 12.5's step 9 asks for a fixture per schema version, and a fixture generated
     /// inside the test that consumes it proves the round trip of the generator rather than
-    /// that a file a person could have on disk is readable. This one is versioned text.
-    fn version_one_fixture() -> Vec<u8> {
+    /// that a file a person could have on disk is readable. These two are versioned text:
+    /// version 1 is WP03's shape and version 2 is WP04's, so each step runs against the
+    /// bytes its own predecessor actually wrote.
+    fn committed_fixture(version: u32) -> Vec<u8> {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let path = std::path::Path::new(manifest_dir)
             .join("tests")
             .join("fixtures")
-            .join("project_v1.anim.json");
+            .join(format!("project_v{version}.anim.json"));
         std::fs::read(&path).unwrap_or_else(|e| panic!("{} is versioned: {e}", path.display()))
+    }
+
+    fn version_one_fixture() -> Vec<u8> {
+        committed_fixture(1)
+    }
+
+    fn version_two_fixture() -> Vec<u8> {
+        committed_fixture(2)
     }
 
     #[test]
     fn a_committed_version_1_file_loads_through_the_real_chain() {
-        let document = load_document(&version_one_fixture()).expect("a v1 file migrates to v2");
+        let document = load_document(&version_one_fixture()).expect("a v1 file migrates to v3");
         assert_eq!(document.schema_version, PROJECT_SCHEMA_VERSION);
         // Everything the operator had survives, which is the only reason a migration is
         // allowed to rewrite a file at all.
@@ -513,6 +571,12 @@ mod tests {
             scene.events().count(),
             0,
             "a version 1 file had no events, and adding the section must not add data"
+        );
+        assert_eq!(
+            document.simulation,
+            crate::simulation::SimulationSettings::for_new_document(),
+            "and a version 1 file had no simulation section either, so the two steps that \
+             add one must add the settings a new project starts with and nothing more"
         );
         let track = scene.tracks().next().unwrap();
         assert_eq!(
@@ -533,25 +597,68 @@ mod tests {
     }
 
     #[test]
-    fn the_step_adds_the_section_and_rewrites_nothing_else() {
+    fn a_committed_version_2_file_loads_through_the_real_chain() {
+        let document = load_document(&version_two_fixture()).expect("a v2 file migrates to v3");
+        assert_eq!(document.schema_version, PROJECT_SCHEMA_VERSION);
+        let scene = document
+            .scenes
+            .values()
+            .next()
+            .expect("the fixture has one scene");
+        // Version 2's own contribution has to survive version 3's step, or the chain would
+        // be a rewrite of WP04 rather than an addition on top of it.
+        assert_eq!(
+            scene.events().count(),
+            2,
+            "the v2 fixture has two authored events"
+        );
+        assert_eq!(scene.markers().len(), 2);
+        assert_eq!(document.revision, anim_core::id::Revision(7));
+        assert_eq!(
+            document.simulation.ticks_per_frame,
+            crate::simulation::DEFAULT_TICKS_PER_FRAME,
+            "a file that recorded no rate gets the one a new document starts with"
+        );
+        assert_eq!(
+            document.simulation.project_seed,
+            crate::simulation::INITIAL_PROJECT_SEED,
+            "and a file that recorded no seed gets zero, which is a value the operator can \
+             see and change, not one invented for them"
+        );
+    }
+
+    #[test]
+    fn the_v1_step_adds_the_section_and_rewrites_nothing_else() {
         // The totality [`MigrationStep`] promises, checked against the committed file
         // rather than against a fixture this test wrote: every member that existed before
-        // is byte-for-byte the same value afterwards, and the only additions are the
-        // document's version number and one empty `events` object per scene.
-        let before: serde_json::Value = serde_json::from_slice(&version_one_fixture()).unwrap();
+        // is byte-for-byte the same value afterwards, and the only additions are one empty
+        // `events` object per scene and the version number this step produces.
+        //
+        // `migrate_json` runs one step here rather than `upgrade_to_current`, because the
+        // current chain is two steps deep and running the whole chain would compare a
+        // version 1 file against a version 3 one — which would then pass this loop only by
+        // ignoring the simulation section the second step added.
+        let mut before: serde_json::Value =
+            serde_json::from_slice(&version_one_fixture()).expect("the v1 fixture parses");
+        let snapshot = before.clone();
+        migrate_json(&mut before, 1, 2, &[V1_TO_V2]).expect("the single step runs");
         let after: serde_json::Value =
-            serde_json::from_slice(&upgrade_to_current(&version_one_fixture()).unwrap()).unwrap();
+            serde_json::from_value(before).expect("the migrated value is still an object");
 
-        assert_eq!(before["schema_version"], serde_json::json!(1));
-        assert_eq!(after["schema_version"], serde_json::json!(2));
+        assert_eq!(snapshot["schema_version"], serde_json::json!(1));
+        assert_eq!(
+            after["schema_version"],
+            serde_json::json!(2),
+            "the step writes the version it produces, not this build's number"
+        );
         for key in ["project_id", "revision", "frame_rate", "assets"] {
             assert_eq!(
-                before[key], after[key],
+                snapshot[key], after[key],
                 "{key} moved, and it should not have"
             );
         }
 
-        let scenes_before = before["scenes"].as_object().unwrap();
+        let scenes_before = snapshot["scenes"].as_object().unwrap();
         let scenes_after = after["scenes"].as_object().unwrap();
         assert_eq!(scenes_before.len(), scenes_after.len());
         for (id, scene_before) in scenes_before {
@@ -572,6 +679,58 @@ mod tests {
                 "the section is the only thing this step adds"
             );
         }
+        assert!(
+            after.get("simulation").is_none(),
+            "the v1 to v2 step must not reach into version 3's data"
+        );
+    }
+
+    #[test]
+    fn the_v2_step_adds_the_section_and_rewrites_nothing_else() {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&version_two_fixture()).expect("the v2 fixture parses");
+        let snapshot = value.clone();
+        migrate_json(&mut value, 2, 3, &[V2_TO_V3]).expect("the single step runs");
+
+        assert_eq!(value["schema_version"], serde_json::json!(3));
+        let simulation = value
+            .get("simulation")
+            .expect("the step added the section")
+            .as_object()
+            .expect("the section is an object")
+            .clone();
+        assert_eq!(
+            simulation.len(),
+            2,
+            "the section is exactly the two fields 14.2 and 14.7 need, and nothing else: \
+             {simulation:?}"
+        );
+        // Every member the file had is untouched — including `scenes`, which is where
+        // version 2's own addition lives and which a careless step could have emptied.
+        for key in ["project_id", "revision", "frame_rate", "assets", "scenes"] {
+            assert_eq!(
+                snapshot[key], value[key],
+                "{key} was rewritten by a step that should only add a section"
+            );
+        }
+        assert_eq!(
+            snapshot["scenes"].as_object().unwrap().len(),
+            value["scenes"].as_object().unwrap().len()
+        );
+        let scene_members: Vec<&String> = value["scenes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert!(
+            scene_members.iter().any(|name| *name == "events"),
+            "the events WP04 authored are still there after WP05's step"
+        );
     }
 
     #[test]
@@ -583,6 +742,35 @@ mod tests {
         let bytes = version_one_fixture();
         assert!(matches!(
             load_document_with_chain(&bytes, &[]),
+            Err(ProjectError::MigrationFailure { .. })
+        ));
+        assert!(
+            serde_json::from_slice::<ProjectDocument>(&bytes).is_err(),
+            "and the refusal is in the typed parse, not only in the chain: nothing can read \
+             an old file by going around it"
+        );
+    }
+
+    #[test]
+    fn a_version_2_file_is_not_readable_as_version_3_without_the_step() {
+        // The same rule a second time, which is the point of re-proving it: the simulation
+        // section has no `serde(default)` either, so a version 2 file cannot be loaded by a
+        // build that skipped `V2_TO_V3` — and the default is not quietly supplied at the
+        // parse boundary, which would make the migration optional and a tick rate invisible.
+        let bytes = version_two_fixture();
+        assert!(matches!(
+            load_document_with_chain(&bytes, &[]),
+            Err(ProjectError::MigrationFailure { .. })
+        ));
+        assert!(
+            serde_json::from_slice::<ProjectDocument>(&bytes).is_err(),
+            "a v2 file has no `simulation`, and a default filled in at parse time would be \
+             exactly the silent substitution 14.11 forbids"
+        );
+        // And with a chain that stops short — the step that exists but does not reach this
+        // version — it still refuses rather than reading the missing section as zero ticks.
+        assert!(matches!(
+            load_document_with_chain(&bytes, &[V1_TO_V2]),
             Err(ProjectError::MigrationFailure { .. })
         ));
     }

@@ -55,6 +55,16 @@ impl CandidateKind {
 }
 
 /// What was found at one path.
+///
+/// `large_enum_variant` is allowed here rather than satisfied by boxing `Complete`: three
+/// variants of which one carries a document is the shape of the answer, the enum is built
+/// once per candidate per directory scan, and the workspace already allows the sibling
+/// heuristic `result_large_err` for the same reason (root `Cargo.toml`) — a designed API
+/// should not be restructured to satisfy a size ratio. The document grew by the 36 bytes of
+/// WP05's `simulation` section, which is what tipped the ratio over the default threshold;
+/// the layout consequence is a few hundred bytes on a stack, and the alternative is a
+/// `Box` that every consumer of 12.7's recovery report would have to unwrap.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CandidateState {
     /// Nothing is at the path. Distinct from unreadable: an absent file is expected on

@@ -20,6 +20,14 @@ anim_project = { path = "../anim_project" }
 # downward through the chain spec 13.4 already draws (`anim_scene -> anim_project`), so
 # no package that spec forbids becomes reachable.
 anim_scene = { path = "../anim_scene" }
+# Added for `wp05_replay` and `tests/wp05_isolation.rs`, spec 14.12's "run 10,000 frames in
+# two fresh processes and compare all CPU state hashes". Same precedent as `anim_scene` above
+# and for the same reason: a claim about processes can only be proven by a process, spec 4.2
+# assigns process fault-injection to this crate, and the crate the claim is about has to be
+# linkable from here. `anim_headless` is the second edge because 14.3 puts the reporting code
+# in that crate (`src/replay.rs`), so the child calls it rather than restating it.
+anim_sim = { path = "../anim_sim" }
+anim_headless = { path = "../anim_headless" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

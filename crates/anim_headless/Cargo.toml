@@ -5,7 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 14.3 assigns `src/replay.rs` -- headless state-hash reporting -- to this crate. The
+# dependencies are the ones that job needs and nothing else: no renderer, no audio device, no
+# editor, and no wall-clock API, because a report a second process must reproduce byte for byte
+# cannot afford any of them.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_project = { path = "../anim_project" }
+anim_sim = { path = "../anim_sim" }
+
+[dev-dependencies]
+uuid = { workspace = true }
 
 [lints]
 workspace = true

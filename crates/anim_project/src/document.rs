@@ -1,7 +1,9 @@
 //! The authoritative document and its revision (spec 12.3).
 //!
-//! `ProjectDocument` is spec 12.8's struct with its six fields and nothing else. The
-//! two things it deliberately does not hold are the ones spec 12.8 names as forbidden —
+//! `ProjectDocument` is spec 12.8's struct with its six fields, plus the two sections later
+//! packages needed and 12.8 does not list — `events` per scene from version 2 and the
+//! `simulation` section from version 3. The two things it deliberately does not hold are the
+//! ones spec 12.8 names as forbidden —
 //! "no editor, renderer, device or undo-stack references" — and the third is a `dirty`
 //! flag: a document that recorded whether it had been saved would need a second writer
 //! to clear it, and spec 12.7's rule is that the flag clears *after* a successful
@@ -19,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::migrate;
 use crate::scene::SceneData;
+use crate::simulation::SimulationSettings;
 use crate::{ProjectError, Result, Revision};
 
 /// The document schema version this build writes (spec 12.8's `schema_version`).
@@ -34,11 +37,12 @@ use crate::{ProjectError, Result, Revision};
 ///
 /// Version 2 is WP04's, and its one change is the `events` section every scene gained so
 /// that spec 13.5 step 1 has something to validate and 13.7 has authored fields to order.
-/// The step is `migrate::V1_TO_V2` and the version 1 fixture is
-/// `tests/fixtures/project_v1.anim.json`, which together are what the rule above asks
-/// for. `DOCUMENT_DOMAIN` stays at `v1`: appending a section to an unchanged framing is
-/// a field addition, not a byte-layout change.
-pub const PROJECT_SCHEMA_VERSION: u32 = 2;
+/// Version 3 is WP05's: the `simulation` section spec 14.2 names as a prerequisite and 12.8
+/// never listed, carrying the tick rate and the random-stream seed. Both steps are real —
+/// `migrate::V1_TO_V2` and `migrate::V2_TO_V3` — with a committed fixture per version, which
+/// is what the rule above asks for. `DOCUMENT_DOMAIN` stays at `v1`: appending a section to
+/// an unchanged framing is a field addition, not a byte-layout change.
+pub const PROJECT_SCHEMA_VERSION: u32 = 3;
 
 /// The authoritative state of one project at one revision.
 ///
@@ -66,6 +70,14 @@ pub struct ProjectDocument {
     pub assets: AssetManifest,
     /// The scenes, keyed by id so that iteration order is id-byte order.
     pub scenes: BTreeMap<SceneId, SceneData>,
+    /// How this project steps, and what its random streams are keyed by (spec 14.2).
+    ///
+    /// Appended after 12.8's six rather than inserted among them, so the byte prefix every
+    /// existing file has is unchanged by the fields that came after it. It is a section
+    /// rather than two loose fields because 14.2's path is `ProjectDocument.simulation`, and
+    /// the seed and the rate are one decision: changing either changes what a saved revision
+    /// replays to.
+    pub simulation: SimulationSettings,
 }
 
 impl ProjectDocument {
@@ -92,6 +104,7 @@ impl ProjectDocument {
             frame_rate,
             assets: AssetManifest::new(),
             scenes: BTreeMap::new(),
+            simulation: SimulationSettings::for_new_document(),
         }
     }
 
@@ -104,9 +117,10 @@ impl ProjectDocument {
     ///
     /// [`ProjectError::UnsupportedSchema`] for a version this build cannot read,
     /// [`ProjectError::Asset`] for a manifest whose dependency graph is broken, and
-    /// [`ProjectError::Validation`] for an invalid scene.
+    /// [`ProjectError::Validation`] for an invalid scene or for a tick rate 14.2 refuses.
     pub fn validate(&self) -> Result<()> {
         migrate::check_document_schema(self.schema_version)?;
+        self.simulation.validate()?;
         migrate::check_asset_schema(self.assets.schema_version())?;
         anim_assets::validate_manifest(&self.assets)?;
         for (scene_id, scene) in &self.scenes {
@@ -193,6 +207,7 @@ impl<'de> Deserialize<'de> for ProjectDocument {
             frame_rate: FrameRate,
             assets: AssetManifest,
             scenes: BTreeMap<SceneId, SceneData>,
+            simulation: SimulationSettings,
         }
         let raw = RawDocument::deserialize(deserializer)?;
         let document = Self {
@@ -202,6 +217,7 @@ impl<'de> Deserialize<'de> for ProjectDocument {
             frame_rate: raw.frame_rate,
             assets: raw.assets,
             scenes: raw.scenes,
+            simulation: raw.simulation,
         };
         document.validate().map_err(serde::de::Error::custom)?;
         Ok(document)
@@ -261,6 +277,7 @@ mod tests {
             "frame_rate",
             "assets",
             "scenes",
+            "simulation",
         ];
         let positions: Vec<usize> = names
             .iter()

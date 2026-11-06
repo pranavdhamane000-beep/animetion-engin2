@@ -1413,3 +1413,213 @@ Each writes `probe-out/<capability>.json` and exits nonzero on an unmet requirem
 `docs/adr/evidence/wp00/`; `probe-out/` itself is git-ignored.
 
 `wp00_pen` is cancelled — see DECISIONS.md #8 and `ADR-0015-native-ink-routing-CANCELLED.md`.
+
+---
+
+## 2026-11-06 (WP05)
+
+### #35 — WP05 — the two-part first decision, taken before code, and what it obliged
+
+WP05's prerequisite did not exist: spec 14.2 names `ProjectDocument.simulation.ticks_per_frame`
+and spec 12.8 declares six document fields, none of them a simulation section. That is the
+package's first decision, it changes the saved format, and it was put to the user as one
+bundled `AskUserQuestion` with two parts **before any code was written**, in the same form as
+#33's four. Both recommended options were taken.
+
+1. **`ticks_per_frame` arrives as raw project data.** `PROJECT_SCHEMA_VERSION` 2 → 3, one real
+   `migrate::chain()` step (`V2_TO_V3`), a committed version-2 fixture,
+   `schemas/project/v3.json`, and `SimulationSettings` in `crates/anim_project/src/simulation.rs`
+   beside `event.rs`.
+   **Rejected: a runtime value supplied by the caller.** 14.12's own criteria settle it —
+   "changing checkpoint cadence or warm-up chunk size cannot change the exported state" and
+   "compare sequential execution with seeks to every tick" are both statements that one saved
+   revision replays to one state, and a per-session rate makes that false by construction.
+   `scheduled_tick = ceil(t * simulation_rate)` is derived from the same number, so an event's
+   tick placement and every subframe spawn age move with it. Spec 40's "the tick rate is
+   project-configured, not a global 1200 Hz constant" agrees, and the memory note that spec 30's
+   `MotionLayer` is camera motion rather than scene animation was correct and is unchanged.
+2. **The random-stream seed lives in the same section**, authored and persisted. 14.7 derives
+   every `StreamKey` from "project seed" and #23 established there is no entropy source in the
+   graph, so a seed generated at open would make a saved project's streams unreproducible from
+   its own bytes and 14.11 forbids substituting one silently.
+   **Rejected: a seed derived from the document digest** — no authoring needed, but every edit
+   re-derives it and shifts every stream in the project, which breaks 14.12's per-stream
+   stability and makes warm-up replay depend on unrelated content changes.
+
+**What those two answers obliged, decided in the same shape (spec gap → one place to record
+it), with the reasoning in `ADR-0009`:**
+
+3. **The frame rate is not copied into the section.** It stays `ProjectDocument.frame_rate`.
+   A second copy would give one timeline two rate bindings that can disagree, which is the same
+   objection `event.rs` raises about a cue's asset. The clock therefore gets built by
+   `anim_sim`'s own `SimSettings::new(document.frame_rate, &document.simulation)`, and 14.9's
+   `initial_state(snapshot, settings)` parameter is named `SimSettings` here while
+   `SimulationSettings` names the persisted section. Two types, one name each, no duplicated
+   value; recorded as a deviation rather than quietly harmonised.
+4. **`INITIAL_PROJECT_SEED` is all zero, and that is a value, not 14.11's substitution.**
+   Substitution would be choosing something else where the data named a seed; a document that
+   has never been saved names nothing, and zero is the stable answer two fresh processes agree
+   on. It is visible in the file and changed by authoring.
+5. **`solver_iterations` is an engine constant carried in the state**, not a persisted field.
+   14.6 says "a **fixed** number of solver iterations" in the same paragraph that says the step
+   duration comes from exact configuration — the two are deliberately different in kind.
+   14.11's `InvalidSolverCount` keeps a producer because the count lives in `SimState`, enters
+   the digest, and is re-checked when a checkpoint is restored. The argument for revisiting it
+   is in `DEFAULT_SOLVER_ITERATIONS`'s doc comment.
+6. **`Spring`'s fields are WP05's**, because 14.8 puts `Vec<Spring>` in `SimState`, 14.7 asks
+   the checkpoint encoder to hash it in stable ID order, and the type has no field list anywhere
+   in 5,438 lines — spec 29 (WP14) defines `SecondaryChainComponent`/`ChainParams`/`ChainNode`
+   and never mentions `Spring`. A spring is an edge from a kinematic anchor node to a dynamic
+   body, with `rest_length` measured from the snapshot at initialization. Bodies are the nodes
+   that have a parent, because `EvaluatedNode.parent` is the only chain structure a snapshot
+   contains — `SimulationInput` deliberately has no parent field. **Consequence: any authored
+   node hierarchy is a spring chain in WP05.** It does not change what the scene evaluator
+   reports, because 14.8's `SimulationFrame` is a separate extraction; WP12 and WP14 will narrow
+   the set when they add the component data, and that is #31.1's minimal-by-ruling pattern
+   extended, twice now.
+7. **A spawn is an `EventKind::Signal` on a source node.** No section authors an emitter for
+   WP05, `Signal` is "a signal for a consumer to react to" and is the one kind with no other
+   consumer, and the emitter identity is then 13.7's third sort term rather than a second
+   binding that can disagree with it. Everything the burst needs beyond that is drawn from the
+   streams, over constants inside `SIMULATION_MODEL_VERSION`.
+8. **`SimState` gained exactly one field beyond 14.8's list: `presentation`, and it is excluded
+   from the canonical encoding.** Without it, 14.9's `SimulationMode` parameter would control
+   nothing, and 14.9 states it controls external side effects. It is not hashed because 14.12
+   requires warm-up and sequential execution to agree at every tick, and a ledger of what a
+   viewer was told cannot be part of what the world is; `restore_checkpoint` clears it, because
+   a restored run has announced nothing. `a_ledger_effect_is_not_part_of_the_digest` asserts
+   the exclusion on bytes.
+9. **`crates/anim_sim/src/context.rs` is a twelfth file**, and `crates/anim_headless` grew a
+   library target next to its binary. 14.3 lists eleven files and locates neither
+   `SimulationContext` nor `SimulationInputFrame`, which 14.9 defines; 14.12's fresh-process
+   clause needs a process, `CARGO_BIN_EXE_` names only binaries in the same package, so the
+   child has to reach the reporting code as a library. Both are departures from a listing, not
+   from a rule.
+10. **`seek` and `prepare_export` take `&mut SimulationContext` where 14.9 writes `&`.** The
+    context owns WP04's `SnapshotCache`, which is owned-and-mutable rather than locked because
+    `clippy.toml` denies `Mutex`/`RwLock` workspace-wide and #22 prefers an owned invariant to
+    interior mutability. A shared borrow cannot fill that cache, so the literal signature would
+    need either a lock or a cache that never fills.
+11. **`anim_sim` depends on `anim_project`,** which 14.4 does not list. Its MUST NOT clause —
+    no `anim_commands`, no renderer, no audio device, no editor, no wall clock — holds;
+    `anim_scene` re-exports no `anim_project` or `anim_core` type at all, and 14.9's own
+    `SimulationContext` "owns immutable project/evaluation inputs". Same reasoning as
+    deviation row 11's direct `anim_assets` edge.
+12. **`V1_TO_V2` now writes `2`, not `PROJECT_SCHEMA_VERSION`.** WP04 wrote the constant while
+    version 2 was the end of the chain, so the two were indistinguishable. With three versions,
+    a step that writes this build's number leaves an intermediate document claiming a version it
+    has not passed through. `V0_TO_V1`'s comment already stated the right rule; the production
+    step now follows it, and `TEST_CHAIN` runs three steps with two real ones.
+13. **`tools/make_v3_schema.py` is versioned where WP04's generator was not.** The schema files
+    are inputs — `.gitignore` says fixtures are inputs, not output — and WP04's generator lived
+    in git-ignored `.tools/` and was deleted after use, so "generated from the previous version,
+    not retyped" was a claim nobody could repeat. A retyped schema is how a JSON pattern that
+    disagrees with the Rust decoder enters the repository.
+
+**Addendum the spec owes:** yes, in five places, none of which changes what the engine does.
+12.8's field list lacks `simulation`; 14.4's dependency list lacks `anim_project`; 14.8 names
+`Spring`, `SimulationFrame`, `SimulationInputFrame`, `SimulationContext`, `SimulationMode` and
+`AlgorithmVersions` without fields; 14.9 types the key as `[u64; 2]` while Philox4x32's key is
+64 bits (ADR-0008 Decision 3 is this project's resolution and the register names that ADR for
+exactly that question); and no section defines `SimulationSettings` at all.
+
+### #36 — WP05 — G4 result summary, and what the tests caught
+
+G4 is WP05 and it is self-certifiable under #21, so this is the record that says it passed.
+`tools\ci.cmd` on 2026-11-06: **fmt PASS, clippy PASS, test PASS** — 584 tests across the
+workspace, against 431 before this package. 14.12's eight clauses are each named by a test in
+`crates/anim_sim/tests/determinism.rs` (19 tests) except the fresh-process half, which is
+`crates/anim_test_support/tests/wp05_isolation.rs` (7 tests) running
+`src/bin/wp05_replay.rs` twice at 10,000 frames and comparing all 40,001 tick hashes line by
+line as well as byte-for-byte as text.
+
+**The external authority is real, and it is the part a project cannot manufacture.**
+`crates/anim_sim/tests/fixtures/philox4x32_10_test_vectors.json` carries 55 published
+known-answer rows from D. E. Shaw Research's Random123 at commit `9545ff64…`, with the SHA-256
+of each fetched file and each row's verbatim source line recorded in the fixture, and all 55
+reproduce exactly. Retrieval also settled a question this package could not have answered
+itself: Random123 publishes the Philox4x32 key as **two 32-bit words**, not the 128 bits 14.7
+derives, so a literal implementation discards half the derived key silently. ADR-0008 Decision 3
+folds the 128 bits into the 64 the primitive reads; the measured discrimination — seven rounds
+reproduces 0 of 55, an eleven-round variant 0, swapped multipliers 0, the wrong key packing 14
+— is why the fixture is worth its bytes.
+
+**Six defects, all introduced by this package, all found before this file was written.**
+
+1. **`random_u32` refused any `stream_version` that differed from
+   `PHILOX_ALGORITHM_VERSION`.** The first version bump of a stream therefore did not change
+   its numbers, it made the stream **unusable** — `UnsupportedAlgorithm` on every draw. That is
+   a design defect found by the gate's own last-but-one clause, not by review: 14.12's
+   "changing one stream version must leave unrelated stream outputs unchanged" cannot be tested
+   against a stream that will not draw at all. Fixed by taking the gate out of the draw, making
+   `stream_version` purely an address term, moving 14.11's "unsupported random algorithm"
+   refusal to `restore_checkpoint` where a version actually arrives from persisted data, and
+   **deleting** `RandomError::UnsupportedAlgorithm` rather than keeping a variant nothing
+   produces — risk 19's shape, applied to my own code the same week it was written down.
+2. **`springs::solve` no-oped.** It looked for each spring's anchor among `SimState.bodies`,
+   and anchors are kinematic — they live in the snapshot, not in the body list — so every pass
+   `continue`d and the fixed-iteration stage ran ten times doing nothing. Caught while reading
+   the draft, and now pinned by `the_solver_projection_lands_on_the_rest_length_and_never_moves
+   _the_anchor`, which measures the distance after a pass and asserts the anchor did not move.
+   A stage that exists, is called, is ordered correctly and computes nothing is the most
+   expensive kind of half-implementation, because every downstream test still passes.
+3. **`accumulate_forces` located a body with `position(...).unwrap_or(len - 1)`.** On a spring
+   whose body was missing, that accumulates force onto the **last body in the list** — finite,
+   plausible, wrong, and silent. Replaced with one `BTreeMap<NodeId, usize>` index built per
+   stage, which is also what removes an `O(n²)` scan from a chain.
+4. **A newborn's subframe age was integrated as a full `dt`.** `spawn_for_event` was passing the
+   step duration where 14.7 says to pass `age = time_of_tick(k) − t`. Working the identity out
+   then produced the rule the module comment now states: a newborn legitimately takes **both**
+   the age and the tick's `dt`, in that order, and they sum to `time_of_tick(k+1) − t` — exactly
+   how long a particle born at `t` has lived at tick `k+1`. The alternative reading, exempting
+   the newborn from its first `dt`, leaves anything born on a tick boundary lagging the authored
+   timeline by one tick for its whole life.
+5. **Nine hand-computed expectations were wrong while the code was right.** This is #33.3's
+   class, and it is the reason the rule survived into a fifth package: 3.5 frames at four ticks
+   per frame is tick **14**, not 84 (I multiplied by the frame rate instead of the tick rate);
+   the Philox counter word for a draw index is `[…, draw, 0]` and I asserted `[0,1,2,3]`; the
+   `age_ticks` field sits at byte **76** of a particle's stream, not 64; a cadence of 7 over
+   ticks 0..40 with capacity 4 keeps `14,21,28,35`, not `7,21,28,35`; `prepare_export` stops on
+   `range.start × N` so a tick-57 target is **56** for that route, and the mid-frame case is now
+   asserted on its own rather than folded into a comparison that would have failed;
+   `FramePos(−1, 1/2)` is exactly on tick −2 at four ticks per frame, so its age is **0** and the
+   non-zero sub-frame case needed `1/3`; two particles sharing an id do **not** hash the same as
+   one, because the count is encoded — the claim was rewritten as the weaker true one, with a
+   self-consistent forged entry as the case only `validate` catches; `advance_lifetimes`
+   increments ages, so a "never held the expired particle" comparison has to advance those ages
+   too; and a stability assertion compared `before[0]` where the survivor's index was simply
+   wherever the sorted order put it. Every correction was made against the specification's
+   arithmetic, none against the implementation's output.
+6. **Four lint-shaped defects that the gate refuses, and one it would not have caught.**
+   `#[must_use]` on functions returning `Result` (denied since clippy 1.99, and every
+   Result-returning function in `anim_core`/`anim_scene`/`anim_project` carries none, so the
+   house rule is to let the type say it); `CanonicalBytes::with_domain(…).expect(…)` in three
+   infallible-signature id derivations, replaced by the `new()` + `text(domain)` pair that
+   `with_domain` is defined as rather than by an `unwrap` in production scope;
+   `SimState::empty_for_test` sitting on the impl block where `unwrap_used` is denied, moved
+   into a `#[cfg(test)] pub(crate) mod test_support`; and `clippy::large_enum_variant` firing on
+   `recovery::CandidateState` because the 36-byte `simulation` section tipped the ratio over the
+   default threshold — allowed with a reason on the enum rather than satisfied by boxing a
+   variant of a public recovery API, which is the same judgement the workspace already makes by
+   allowing `result_large_err` at the top level.
+
+**What WP06 and later packages need from this one, in one place.**
+
+- `BUILD_STATE.md`'s Current Work Package row is the resume point. `anim_sim` is the only
+  consumer of `anim_scene`'s snapshots, `SimulationContext` is the only thing that evaluates on
+  the simulation path, and nothing in `anim_sim` takes `&mut` to `anim_project` types.
+- **Read DECISIONS.md #18 before designing adapter selection or telemetry.** Nothing enforces
+  it, and WP06 is where that stops being theoretical.
+- No command authors simulation settings yet, and none authors an event: 12.9's set is WP03's
+  twelve, spec 13 and spec 14 add none. WP10 owes `PlaceEvent`- **and**
+  `SetSimulationSettings`-shaped commands, must extend
+  `every_command_kind_has_an_inverse_that_closes` rather than trust it forward, and must be
+  handed a narrowed `Registry` (item 16).
+- `SimError::TickOverflow`'s `"schedule size"` operation is unreachable at any event count a
+  document can hold; it is declared because the arithmetic path is shared. Stated in
+  `ADR-0009`'s outstanding list rather than given a fake call site.
+- The particle set is unbounded in WP05. 29's truncation rule belongs to WP14/WP09, and
+  18.8's `ExportSettings` has no field for it either — a contradiction in the spec, raised here
+  rather than resolved by guessing.
+- Property paths still come from WP04's registry in `animation.rs`; the simulation reads none of
+  them, and a WP10 picker should offer those names rather than free text (item 21).

@@ -5,7 +5,32 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 14.4: `anim_sim` depends on `anim_core`, `anim_scene` and read-only `anim_assets`,
+# uses blake3 (through `anim_core`'s canonical encoder, as `anim_scene` does), bytemuck-level
+# bit access (std `to_bits`, so no `bytemuck` dependency is needed for it), `thiserror` and
+# ordered standard collections. `anim_project` is the one addition the section does not list:
+# 14.9's own `SimulationContext` "owns immutable project/evaluation inputs", `anim_scene`
+# re-exports none of those types, and the settings 14.2 requires are project data — so naming
+# `ProjectDocument`, `FrameRate` and `SimulationSettings` has to go through their owning
+# crate. Deviation row 15 in `BUILD_STATE.md`. What 14.4 actually prohibits is absent: no
+# `anim_commands`, no renderer, no audio device, no editor, no wall-clock API.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_scene = { path = "../anim_scene" }
+anim_project = { path = "../anim_project" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The published Philox vectors are read as JSON, the id fixtures derive through the same
+# RFC 4122 namespace every other crate's tests use, and `blake3` is here for one purpose in
+# `tests/determinism.rs`: recompute the stream-key pre-image from the layout rule and hash it
+# independently of `CanonicalBytes::digest`, because an oracle that calls the encoder under
+# test proves only that the same code ran twice (DECISIONS.md #32). All three are already in
+# the lock, and 14.4 names blake3 as a dependency of this crate anyway.
+serde_json = { workspace = true }
+uuid = { workspace = true }
+blake3 = { workspace = true }
 
 [lints]
 workspace = true

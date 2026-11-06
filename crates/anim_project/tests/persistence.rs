@@ -624,17 +624,25 @@ fn the_committed_schema_matches_what_the_serializers_write() {
     // repository, not from a build-time generation step, so this file is what a person
     // can open and disagree with.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let version = anim_project::document::PROJECT_SCHEMA_VERSION;
     let path = Path::new(manifest_dir)
         .parent()
         .and_then(Path::parent)
         .expect("workspace root")
         .join("schemas")
         .join("project")
-        .join("v2.json");
+        .join(format!("v{version}.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is versioned and must be readable: {e}", path.display()));
     let schema_document: Value = serde_json::from_str(&text).unwrap();
     let defs = schema_document["$defs"].as_object().unwrap();
+    assert_eq!(
+        schema_document["properties"]["schema_version"]["const"].as_u64(),
+        Some(u64::from(version)),
+        "the schema file this test reads is named for the version this build writes, and \
+         the file's own `const` must agree — a pinned filename plus a stale const is how a \
+         schema keeps describing the previous package"
+    );
 
     let document = rich_document(1);
     let document_json: Value =
@@ -730,6 +738,16 @@ fn the_committed_schema_matches_what_the_serializers_write() {
     );
     check(
         &schema_document,
+        "simulation_settings",
+        &serde_json::to_value(document.simulation).unwrap(),
+    );
+    assert!(
+        defs.contains_key("project_seed"),
+        "the seed's single text spelling is described in the schema and not only in \
+         simulation.rs's decoder"
+    );
+    check(
+        &schema_document,
         "frame_pos",
         &serde_json::to_value(FramePos::at_frame(3)).unwrap(),
     );
@@ -786,5 +804,38 @@ fn the_schema_patterns_describe_refusals_the_loaders_already_make() {
     assert!(
         PropertyPath::new("transform x").is_err(),
         "the path pattern is enforced on load, not only declared"
+    );
+    // Version 3's addition, proven the same way. `^[0-9a-f]{64}$` is worth writing only
+    // because the decoder refuses everything outside it; a tolerant parser would make the
+    // schema's pattern decoration, which is what this whole test exists to catch.
+    let sixty_four_a = "a".repeat(64);
+    let bad_seeds = [
+        "A".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        "z".repeat(64),
+        "0x".to_string() + &"a".repeat(62),
+    ];
+    for bad_seed in &bad_seeds {
+        let json = format!("{{\"ticks_per_frame\":1,\"project_seed\":\"{bad_seed}\"}}");
+        assert!(
+            serde_json::from_str::<anim_project::SimulationSettings>(&json).is_err(),
+            "{bad_seed:?} is outside the schema's seed pattern and must not load"
+        );
+    }
+    assert!(
+        serde_json::from_str::<anim_project::SimulationSettings>(
+            "{\"ticks_per_frame\":0,\"project_seed\":\"0/1\"}"
+        )
+        .is_err(),
+        "and the seed is not the only pattern with a refusal behind it: 14.2's nonzero tick \
+         rate is checked on the load path too"
+    );
+    assert!(
+        serde_json::from_str::<anim_project::SimulationSettings>(&format!(
+            "{{\"ticks_per_frame\":1,\"project_seed\":\"{sixty_four_a}\"}}"
+        ))
+        .is_ok(),
+        "the spelling the schema allows is the spelling the serializer writes"
     );
 }

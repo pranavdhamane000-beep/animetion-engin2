@@ -287,6 +287,7 @@ mod tests {
             "frame_rate": object["frame_rate"].clone(),
             "revision": object["revision"].clone(),
             "project_id": object["project_id"].clone(),
+            "simulation": object["simulation"].clone(),
             "schema_version": object["schema_version"].clone(),
         });
         let bytes = serde_json::to_vec(&reordered).unwrap();

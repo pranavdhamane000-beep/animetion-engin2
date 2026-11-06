@@ -15,6 +15,11 @@
 //! [`event`] is the eighth file, added by WP04: spec 13.5 step 1 validates event
 //! definitions and 13.7 orders their occurrences by authored fields, and no file 12.3
 //! or 13.3 owns that data. Recorded as a deviation row in `BUILD_STATE.md`.
+//!
+//! [`simulation`] is the ninth, added by WP05 for the same reason: spec 14.2 makes
+//! `ProjectDocument.simulation.ticks_per_frame` a WP05 prerequisite, 12.8 does not list a
+//! simulation section, and a tick rate supplied per session instead would let one saved
+//! revision replay to two different states.
 
 pub mod document;
 pub mod event;
@@ -24,6 +29,7 @@ pub mod recovery;
 pub mod save;
 pub mod scene;
 pub mod schema;
+pub mod simulation;
 
 pub use anim_assets::{
     AssetKind, AssetManifest, AssetManifestEntry, ContentHash, MANIFEST_SCHEMA_VERSION,
@@ -42,6 +48,9 @@ pub use property::{
     EASING_ALGORITHM_VERSION, EASING_CURVE_MAX_POINTS,
 };
 pub use scene::{Marker, NodeData, SceneData, TrackData};
+pub use simulation::{
+    SimulationSettings, DEFAULT_TICKS_PER_FRAME, INITIAL_PROJECT_SEED, PROJECT_SEED_BYTES,
+};
 
 /// The domain separator for the document's own canonical byte stream (ADR-0004
 /// consequence 5, applied by ADR-0005's closure in this package).
