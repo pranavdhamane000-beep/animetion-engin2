@@ -110,6 +110,16 @@ mod tests {
         Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap()
     }
 
+    /// The claims a hand-built `Image` record must carry to be legal at all (spec 15.2,
+    /// DECISIONS.md #40 ruling 2). These tests assert canonical byte order across the whole
+    /// document, so the claims are just one more field that must be present and spelled.
+    fn claims() -> Option<anim_assets::ImageAssetClaims> {
+        Some(anim_assets::ImageAssetClaims {
+            color_space: anim_assets::ImageColorSpace::Srgb,
+            alpha: anim_assets::ImageAlpha::Straight,
+        })
+    }
+
     fn derived(label: &str) -> Uuid {
         Uuid::new_v5(&namespace(), label.as_bytes())
     }
@@ -156,6 +166,7 @@ mod tests {
                     1,
                     dependencies,
                     name,
+                    claims(),
                 )
                 .unwrap(),
             );

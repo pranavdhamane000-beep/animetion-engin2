@@ -317,6 +317,14 @@ mod tests {
             version,
             [],
             "cel",
+            // The claims follow the kind, which is exactly the rule the constructor
+            // enforces and the reason this helper has to spell it out rather than pass a
+            // default: a registry test that asked for a `Font` record and silently got
+            // image claims would be testing a record no importer can produce.
+            (kind == AssetKind::Image).then_some(crate::image::ImageAssetClaims {
+                color_space: crate::image::ImageColorSpace::Srgb,
+                alpha: crate::image::ImageAlpha::Straight,
+            }),
         )
         .unwrap()
     }
@@ -494,6 +502,10 @@ mod tests {
                 *version,
                 [],
                 "x",
+                (*kind == AssetKind::Image).then_some(crate::image::ImageAssetClaims {
+                    color_space: crate::image::ImageColorSpace::Srgb,
+                    alpha: crate::image::ImageAlpha::Straight,
+                }),
             )
             .unwrap()
         })

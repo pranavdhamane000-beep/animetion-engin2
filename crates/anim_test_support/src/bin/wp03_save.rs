@@ -192,6 +192,7 @@ fn document(revision: u64) -> Result<ProjectDocument, String> {
             1,
             [],
             "cel-001",
+            claims(),
         )
         .map_err(|e| format!("asset record: {e}"))?,
     );
@@ -237,6 +238,20 @@ fn document(revision: u64) -> Result<ProjectDocument, String> {
 
 fn project_id(namespace: &uuid::Uuid) -> ProjectId {
     ProjectId::derive(namespace, b"wp03-save")
+}
+
+/// The claims a hand-built `Image` record must carry to be legal at all (spec 15.2,
+/// DECISIONS.md #40 ruling 2).
+///
+/// Fixed here rather than derived, and that choice matters for what this binary proves: the
+/// kill scenarios compare a save's *bytes*, so a claims value that moved between the two
+/// revisions would make `old.bin` and `new.bin` differ by something other than the revision.
+/// One constant keeps the fault-injection assertions about the thing they are about.
+fn claims() -> Option<anim_assets::ImageAssetClaims> {
+    Some(anim_assets::ImageAssetClaims {
+        color_space: anim_assets::ImageColorSpace::Srgb,
+        alpha: anim_assets::ImageAlpha::Straight,
+    })
 }
 
 fn scene_id(namespace: &uuid::Uuid) -> SceneId {

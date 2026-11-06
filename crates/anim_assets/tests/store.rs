@@ -20,8 +20,9 @@
 use std::io::{self, Read};
 
 use anim_assets::{
-    import, manifest_digest, resolve, resolve_with, verify, AssetError, AssetKind, AssetManifest,
-    AssetManifestEntry, AssetStore, ContentHash, ResolutionPolicy, CURRENT_IMPORTER_VERSION,
+    import, import_observed, manifest_digest, resolve, resolve_with, verify, AssetError, AssetKind,
+    AssetManifest, AssetManifestEntry, AssetStore, ContentHash, ResolutionPolicy,
+    CURRENT_IMPORTER_VERSION,
 };
 use anim_core::id::AssetId;
 use uuid::Uuid;
@@ -39,6 +40,67 @@ fn payload(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u64 * 31 + u64::from(seed)) as u8)
         .collect()
+}
+
+/// One PNG chunk as bytes, with the zero CRC nothing in this crate reads.
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + data.len());
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&[0u8; 4]);
+    out
+}
+
+/// The same deterministic content, framed as a PNG that `image.rs` can read.
+///
+/// A test that imports an asset as an `Image` is now importing an image: the record
+/// carries colour and alpha claims, and those come from the stored object's header, so
+/// payload bytes with no signature are refused as a malformed asset. That refusal is the
+/// behaviour under test, not an obstacle, which is why the fixtures got honest rather than
+/// the assertion softer.
+///
+/// The framing is deliberately minimal — an 8x8 RGBA `IHDR` and one `IDAT` holding the
+/// rest — because colour type 6 with no colour chunk is the case the classification rules
+/// resolve to `srgb`/`straight`, and `IDAT`'s payload is where `payload`'s varying bytes
+/// go, so two seeds still give two digests. The total length is exactly `len`, which three
+/// scenarios assert on.
+fn image_payload(seed: u8, len: usize) -> Vec<u8> {
+    let header_len = 8 + 25 + 12;
+    assert!(
+        len > header_len,
+        "a PNG fixture shorter than its own header is not a cel"
+    );
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8u8, 6u8, 0u8, 0u8, 0u8]);
+    let body = payload(seed, len - header_len);
+    [
+        b"\x89PNG\r\n\x1a\n".to_vec(),
+        png_chunk(b"IHDR", &ihdr),
+        png_chunk(b"IDAT", &body),
+    ]
+    .concat()
+}
+
+/// A `png`-shaped fixture whose header declares a colour chunk, for the classification
+/// paths that need one. `extra` is inserted between `IHDR` and `IDAT`, which is where the
+/// format puts every colour and transparency chunk.
+fn image_payload_with(seed: u8, len: usize, extra: &[u8]) -> Vec<u8> {
+    let header_len = 8 + 25 + 12 + extra.len();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8u8, 6u8, 0u8, 0u8, 0u8]);
+    let body = payload(seed, len - header_len);
+    [
+        b"\x89PNG\r\n\x1a\n".to_vec(),
+        png_chunk(b"IHDR", &ihdr),
+        extra.to_vec(),
+        png_chunk(b"IDAT", &body),
+    ]
+    .concat()
 }
 
 /// The digest of a payload, computed here rather than asked of the crate.
@@ -80,6 +142,18 @@ fn import_bytes(
         bytes,
     )
     .unwrap_or_else(|e| panic!("import of {label} failed: {e}"))
+}
+
+/// The claims a hand-built `Image` record must carry to be legal at all.
+///
+/// `import` derives these from the stored header; a record assembled by hand has to say
+/// them explicitly, and the two `None`s the non-image kinds need are the same rule seen
+/// from the other side.
+fn claims() -> Option<anim_assets::ImageAssetClaims> {
+    Some(anim_assets::ImageAssetClaims {
+        color_space: anim_assets::ImageColorSpace::Srgb,
+        alpha: anim_assets::ImageAlpha::Straight,
+    })
 }
 
 /// Every object the manifest names must still be present and byte-exact.
@@ -129,7 +203,7 @@ fn assert_no_stray_objects(project: &Project, manifest: &AssetManifest) {
 #[test]
 fn an_imported_object_lands_on_the_digest_derived_path() {
     let project = project();
-    let bytes = payload(0x11, 4096);
+    let bytes = image_payload(0x11, 4096);
     let record = import_bytes(&project, "cel", &bytes, AssetKind::Image);
 
     assert_eq!(record.byte_length, 4096);
@@ -223,7 +297,7 @@ impl Read for ChunkProbe {
 #[test]
 fn duplicate_content_shares_one_object_and_two_ids_keep_their_own_records() {
     let project = project();
-    let bytes = payload(0x77, 8192);
+    let bytes = image_payload(0x77, 8192);
     let first = import_bytes(&project, "first", &bytes, AssetKind::Image);
     let second = import_bytes(&project, "second", &bytes, AssetKind::Image);
 
@@ -260,8 +334,8 @@ fn a_reimport_of_the_same_id_moves_the_content_and_keeps_the_identity() {
     // Spec 11.6: "Reimport with the same AssetId creates a new manifest revision while
     // preserving logical identity."
     let project = project();
-    let old_bytes = payload(0x01, 1000);
-    let new_bytes = payload(0x02, 2000);
+    let old_bytes = image_payload(0x01, 1000);
+    let new_bytes = image_payload(0x02, 2000);
     let old_record = import_bytes(&project, "pose", &old_bytes, AssetKind::Image);
     let new_record = import(
         &project.store,
@@ -313,7 +387,7 @@ fn manifest_digests_agree_under_shuffled_insertion_after_real_imports() {
             import_bytes(
                 &project,
                 &format!("cel-{i}"),
-                &payload(i as u8, 300 + i),
+                &image_payload(i as u8, 300 + i),
                 AssetKind::Image,
             )
         })
@@ -373,7 +447,7 @@ fn a_path_that_is_not_a_digest_cannot_name_an_object() {
     }
     // And a display name never reaches a path: the object path is a function of the
     // digest alone.
-    let bytes = payload(0x09, 32);
+    let bytes = image_payload(0x09, 64);
     let record = import(
         &project.store,
         id("hostile"),
@@ -422,7 +496,7 @@ fn a_store_rooted_elsewhere_cannot_reach_outside_it() {
 #[test]
 fn corrupted_bytes_are_caught_by_verification_and_stop_resolution() {
     let project = project();
-    let bytes = payload(0x55, 4096);
+    let bytes = image_payload(0x55, 4096);
     let record = import_bytes(&project, "cel", &bytes, AssetKind::Image);
     let mut manifest = AssetManifest::new();
     manifest.insert(record.clone());
@@ -462,7 +536,7 @@ fn corrupted_bytes_are_caught_by_verification_and_stop_resolution() {
 #[test]
 fn a_truncated_file_is_a_size_mismatch_before_any_content_is_hashed() {
     let project = project();
-    let bytes = payload(0x5A, 64 * 1024);
+    let bytes = image_payload(0x5A, 64 * 1024);
     let record = import_bytes(&project, "long-cel", &bytes, AssetKind::Image);
     let path = project.store.object_path(&record.content_hash);
 
@@ -500,7 +574,7 @@ fn a_truncated_file_is_a_size_mismatch_before_any_content_is_hashed() {
 )]
 fn a_missing_object_is_reported_as_absent_not_corrupt() {
     let project = project();
-    let record = import_bytes(&project, "cel", &payload(0x2C, 128), AssetKind::Image);
+    let record = import_bytes(&project, "cel", &image_payload(0x2C, 128), AssetKind::Image);
     let mut manifest = AssetManifest::new();
     manifest.insert(record.clone());
     std::fs::remove_file(project.store.object_path(&record.content_hash)).unwrap();
@@ -534,6 +608,7 @@ fn a_missing_dependency_is_refused_before_anything_resolves_through_it() {
         CURRENT_IMPORTER_VERSION,
         [id("nowhere")],
         "cel.png",
+        claims(),
     )
     .unwrap();
     manifest.insert(dangling.clone());
@@ -553,7 +628,7 @@ fn a_missing_dependency_is_refused_before_anything_resolves_through_it() {
 #[test]
 fn a_cycle_in_the_dependency_graph_is_named_and_not_walked() {
     let project = project();
-    let record = import_bytes(&project, "a", &payload(0x61, 64), AssetKind::Image);
+    let record = import_bytes(&project, "a", &image_payload(0x61, 64), AssetKind::Image);
     let a = AssetManifestEntry::new(
         id("a"),
         record.content_hash,
@@ -562,6 +637,7 @@ fn a_cycle_in_the_dependency_graph_is_named_and_not_walked() {
         CURRENT_IMPORTER_VERSION,
         [id("b")],
         "a.png",
+        claims(),
     )
     .unwrap();
     let b = AssetManifestEntry::new(
@@ -572,6 +648,7 @@ fn a_cycle_in_the_dependency_graph_is_named_and_not_walked() {
         CURRENT_IMPORTER_VERSION,
         [id("a")],
         "b.png",
+        claims(),
     )
     .unwrap();
     let mut manifest = AssetManifest::new();
@@ -588,7 +665,12 @@ fn a_cycle_in_the_dependency_graph_is_named_and_not_walked() {
 #[test]
 fn an_interrupted_source_leaves_no_record_and_no_temporary() {
     let project = project();
-    let settled = import_bytes(&project, "settled", &payload(0x30, 5000), AssetKind::Image);
+    let settled = import_bytes(
+        &project,
+        "settled",
+        &image_payload(0x30, 5000),
+        AssetKind::Image,
+    );
     let mut manifest = AssetManifest::new();
     manifest.insert(settled.clone());
 
@@ -702,7 +784,12 @@ fn a_failure_immediately_before_the_object_rename_leaves_the_project_usable() {
     // `wp00_replace --fault before-commit` proved for the project file, at the object
     // store's boundary.
     let project = project();
-    let settled = import_bytes(&project, "settled", &payload(0x41, 4096), AssetKind::Image);
+    let settled = import_bytes(
+        &project,
+        "settled",
+        &image_payload(0x41, 4096),
+        AssetKind::Image,
+    );
     let mut manifest = AssetManifest::new();
     manifest.insert(settled.clone());
 
@@ -757,7 +844,7 @@ fn a_publish_collision_reuses_the_existing_object() {
     // Two ids, identical bytes, imported in either order: the second one finds the
     // object present, verifies it, and discards its own temporary (spec 11.7).
     let project = project();
-    let bytes = payload(0x50, 100 * 1024);
+    let bytes = image_payload(0x50, 100 * 1024);
     let a = import_bytes(&project, "a", &bytes, AssetKind::Image);
     let b = import(
         &project.store,
@@ -835,7 +922,7 @@ fn export_verification_covers_every_record_and_names_the_first_failure() {
         let record = import_bytes(
             &project,
             &format!("cel-{i}"),
-            &payload(i as u8, 700),
+            &image_payload(i as u8, 700),
             AssetKind::Image,
         );
         manifest.insert(record);
@@ -886,11 +973,186 @@ fn an_empty_project_imports_verifies_and_digests() {
 }
 
 #[test]
+fn an_imported_image_record_carries_the_claims_its_header_states() {
+    // Spec 15.2's prerequisite, end to end: the renderer's colour input is authored data
+    // in the manifest, produced once at import from the object's own header. The four
+    // fixtures are the four rules that can fire on a real file, and the last is the one
+    // that matters most — an unmarked cel gets an answer, written into hashed bytes,
+    // rather than a question a renderer has to guess at.
+    let project = project();
+    let mut gamma = Vec::new();
+    gamma.extend_from_slice(&100_000u32.to_be_bytes());
+    let cases: Vec<(
+        Vec<u8>,
+        anim_assets::ImageColorSpace,
+        anim_assets::ImageAlpha,
+    )> = vec![
+        // No colour chunk at all: the default rule, decided at import.
+        (
+            image_payload(0x01, 4096),
+            anim_assets::ImageColorSpace::Srgb,
+            anim_assets::ImageAlpha::Straight,
+        ),
+        (
+            image_payload_with(0x02, 4096, &png_chunk(b"sRGB", &[0])),
+            anim_assets::ImageColorSpace::Srgb,
+            anim_assets::ImageAlpha::Straight,
+        ),
+        (
+            image_payload_with(0x03, 4096, &png_chunk(b"gAMA", &gamma)),
+            anim_assets::ImageColorSpace::Linear,
+            anim_assets::ImageAlpha::Straight,
+        ),
+    ];
+    for (index, (bytes, color_space, alpha)) in cases.into_iter().enumerate() {
+        let label = format!("cel-{index}");
+        let record = import(
+            &project.store,
+            id(&label),
+            format!("{label}.png"),
+            AssetKind::Image,
+            CURRENT_IMPORTER_VERSION,
+            &bytes[..],
+        )
+        .unwrap_or_else(|e| panic!("import of {label} failed: {e}"));
+        assert_eq!(
+            record.image,
+            Some(anim_assets::ImageAssetClaims { color_space, alpha }),
+            "case {index}"
+        );
+    }
+
+    // A kind with no colour claims gets `None`, which is the same rule the constructor
+    // enforces: the field is present if and only if the kind can carry it.
+    let sheet = import_bytes(&project, "sheet", &payload(0x0A, 512), AssetKind::Other);
+    assert_eq!(sheet.image, None);
+    verify(&project.store, &sheet).unwrap();
+}
+
+#[test]
+fn an_embedded_profile_is_recorded_as_unclassified_and_named_in_a_finding() {
+    // The one classification that refuses to conclude, and the report that comes with it.
+    // Approximating a profile this engine does not model to `srgb` would put a colour the
+    // author never declared into hashed data; `import_observed` is how a caller with a
+    // diagnostic channel hears about it, and the record carries the refusal either way.
+    let project = project();
+    let mut iccp = b"Adobe RGB (1998)".to_vec();
+    iccp.push(0); // the name's terminator
+    iccp.push(0); // compression method: deflate
+    iccp.extend_from_slice(&[0u8; 64]);
+    let bytes = image_payload_with(0x0B, 4096, &png_chunk(b"iCCP", &iccp));
+
+    let mut findings: Vec<anim_core::diagnostic::Diagnostic> = Vec::new();
+    let record = import_observed(
+        &project.store,
+        id("profiled"),
+        "profiled.png".into(),
+        AssetKind::Image,
+        CURRENT_IMPORTER_VERSION,
+        &bytes[..],
+        &mut |finding| findings.push(finding),
+    )
+    .unwrap();
+
+    assert_eq!(
+        record.image,
+        Some(anim_assets::ImageAssetClaims {
+            color_space: anim_assets::ImageColorSpace::Unclassified,
+            alpha: anim_assets::ImageAlpha::Straight,
+        }),
+        "the colour space is refused and the alpha, which the header does state, is not"
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let finding = &findings[0];
+    assert_eq!(finding.code.as_str(), anim_assets::UNMODELLED_PROFILE_CODE);
+    assert_eq!(
+        finding.severity,
+        anim_core::diagnostic::DiagnosticSeverity::Warning,
+        "an import that recorded its own limits succeeded"
+    );
+    assert!(
+        finding
+            .context
+            .values()
+            .any(|value| value == "Adobe RGB (1998)"),
+        "the diagnostic names the profile the author wrote: {finding:?}"
+    );
+    assert!(finding.context.contains_key("asset_id"), "{finding:?}");
+
+    // And the plain `import`, whose signature spec 11.9 fixes with no room for a
+    // finding, records the same claim: what it drops is the warning, never the fact.
+    let quiet = import(
+        &project.store,
+        id("quiet"),
+        "quiet.png".into(),
+        AssetKind::Image,
+        CURRENT_IMPORTER_VERSION,
+        &bytes[..],
+    )
+    .unwrap();
+    assert_eq!(quiet.image, record.image);
+}
+
+#[test]
+fn an_image_asset_whose_bytes_are_not_an_image_is_refused_and_leaves_nothing() {
+    // The consequence of recording claims derived from the header: an `Image` import is
+    // now a claim about a readable image, and bytes with no header this build reads are
+    // refused rather than filed with a colour space invented for them. Spec 11.8's
+    // "failed imports leave no manifest entry" applies to this failure like any other.
+    let project = project();
+    let settled = import_bytes(
+        &project,
+        "settled",
+        &image_payload(0x0C, 512),
+        AssetKind::Image,
+    );
+    let mut manifest = AssetManifest::new();
+    manifest.insert(settled.clone());
+
+    // The PNG signature with a first chunk that is not `IHDR`: a recognized format that
+    // does not parse, which is `MalformedAsset` rather than a missing reader.
+    let not_a_cel = [b"\x89PNG\r\n\x1a\n".to_vec(), b"gABD".to_vec()].concat();
+    let e = import(
+        &project.store,
+        id("bad"),
+        "bad.png".into(),
+        AssetKind::Image,
+        CURRENT_IMPORTER_VERSION,
+        &not_a_cel[..],
+    )
+    .unwrap_err();
+    assert!(matches!(e, AssetError::MalformedAsset { .. }), "{e}");
+    assert!(e.to_string().contains(&id("bad").to_string()), "{e}");
+
+    assert!(!manifest.contains(&id("bad")));
+    assert_no_stray_objects(&project, &manifest);
+    assert_store_usable(&project, &manifest);
+
+    // A format with no reader at all stays a different refusal: 11.11 names the case, and
+    // the fix is a reader, not a re-export.
+    let e = import(
+        &project.store,
+        id("webp"),
+        "cel.webp".into(),
+        AssetKind::Image,
+        CURRENT_IMPORTER_VERSION,
+        &b"RIFF....WEBPVP8 "[..],
+    )
+    .unwrap_err();
+    assert!(matches!(e, AssetError::UnsupportedDecoder { .. }), "{e}");
+    assert_no_stray_objects(&project, &manifest);
+
+    // The same bytes are perfectly importable as a kind that makes no colour claim.
+    let as_other = import_bytes(&project, "as-other", &not_a_cel, AssetKind::Other);
+    assert_eq!(as_other.image, None);
+}
+
+#[test]
 fn a_record_and_a_manifest_survive_their_json_form_unchanged() {
     // The persisted shape is what WP03 saves, so it is checked here rather than
     // inherited from a document layer that does not exist yet.
     let project = project();
-    let cel = import_bytes(&project, "cel", &payload(0x80, 64), AssetKind::Image);
+    let cel = import_bytes(&project, "cel", &image_payload(0x80, 64), AssetKind::Image);
     let rig = AssetManifestEntry::new(
         id("rig"),
         cel.content_hash,
@@ -899,6 +1161,7 @@ fn a_record_and_a_manifest_survive_their_json_form_unchanged() {
         2,
         [cel.asset_id],
         "rig.json",
+        None,
     )
     .unwrap();
     let mut manifest = AssetManifest::new();

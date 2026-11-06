@@ -1,0 +1,590 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anim-engine.local/schemas/project/v4.json",
+  "title": "anim_engine project document, schema version 4",
+  "description": "The persisted shape of crates/anim_project's ProjectDocument (spec 12.8) and the types it embeds, at schema version 2. Hand-authored, and checked against the bytes the Rust serializers actually write by `the_committed_schema_matches_what_the_serializers_write` in crates/anim_project/tests/persistence.rs -- that test is the reason this file can be read without running anything and still be trusted. Version 2 adds the scene-level `events` section and the `easing_curve`, `event_definition` and `event_kind` definitions, and `schemas/project/v1.json` stays as the description of the files that still exist on disk at that version: `anim_project::migrate::V1_TO_V2` is what carries one into the other. Acceptance of a real file happens at the typed boundary in anim_project::migrate and anim_project::schema, not by a validator: spec 5.1 names no JSON Schema dependency, and a non-canonical rational or a malformed uuid is already refused by its own constructor. A member's ORDER inside one object is not expressible in JSON Schema and is not asserted here; it belongs to canonical serialization (ADR-0005, closed by WP03) and is proven byte-for-byte by anim_project::schema::verify_canonical_bytes.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "revision",
+    "frame_rate",
+    "assets",
+    "scenes",
+    "simulation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 4,
+      "description": "The document version. Independent of assets.schema_version and of the command envelope version (ADR-0005 Decision 4, Consequence 5). Version 2 is WP04's scene-level events section; version 3 is WP05's document-level simulation section; version 4 is WP06's per-asset image color-space and alpha claims, because spec 15.2 makes them a prerequisite of the render graph and 11.8 gave the record no field for them. The encoding domain anim_engine/document/v1 did NOT move: appending one field to each record of an embedded collection is a field addition on an unchanged framing, the split lib.rs states and that versions 2 and 3 already established. assets.schema_version did move, 1 -> 2, because the record's canonical byte stream grew a term, and that changes every manifest_digest by design -- see the digest test in anim_assets/src/manifest.rs."
+    },
+    "project_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "One increment per committed batch; zero is a new document (spec 10.8, 12.6)."
+    },
+    "frame_rate": {
+      "$ref": "#/$defs/frame_rate"
+    },
+    "assets": {
+      "$ref": "#/$defs/manifest"
+    },
+    "scenes": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/uuid"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/scene"
+      },
+      "description": "Keyed by SceneId. Order in the file is the map's key order, which is id-byte order; a `BTreeMap` makes that a property of the type rather than of the writer."
+    },
+    "simulation": {
+      "$ref": "#/$defs/simulation_settings",
+      "description": "Appended after 12.8's six fields so that the byte prefix every existing file has is unchanged by the section that came after it."
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Lowercase hyphenated, exactly one spelling (spec 5.1, anim_core::id)."
+    },
+    "rational": {
+      "type": "string",
+      "pattern": "^-?[0-9]+/[1-9][0-9]*$",
+      "description": "Reduced, positive denominator, zero as 0/1. A non-canonical spelling is refused on read, not normalized (ADR-0004)."
+    },
+    "frame_pos": {
+      "type": "object",
+      "required": [
+        "frame",
+        "subframe"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "frame": {
+          "type": "integer"
+        },
+        "subframe": {
+          "$ref": "#/$defs/rational",
+          "description": "Normalized to [0,1); overflow carries into `frame`, which is why one instant has exactly one spelling (DECISIONS.md #22)."
+        }
+      }
+    },
+    "frame_rate": {
+      "type": "object",
+      "required": [
+        "num",
+        "den"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "num": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "den": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "easing": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "linear",
+            "step"
+          ],
+          "description": "The two spellings spec 13.6 states a rule for, written as bare names exactly as anim_project::property::Easing::as_str spells them for the canonical byte tag."
+        },
+        {
+          "type": "object",
+          "required": [
+            "curve"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "curve": {
+              "$ref": "#/$defs/easing_curve"
+            }
+          },
+          "description": "The parameterized easing spec 13.7 needs in order for its \"invalid easing parameters\" and 13.11's InvalidEasing to name anything. A struct variant, so JSON writes the tag as an object member while the canonical stream writes the tag text curve followed by the table."
+        }
+      ]
+    },
+    "property_path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$"
+    },
+    "property_value": {
+      "description": "Externally tagged, and there is no float variant: spec 7.1 keeps rounded values out of persisted state.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "rational"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "rational": {
+              "$ref": "#/$defs/rational"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "bool"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "bool": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "asset"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        }
+      ]
+    },
+    "property_key": {
+      "type": "object",
+      "required": [
+        "position",
+        "value",
+        "easing"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/frame_pos"
+        },
+        "value": {
+          "$ref": "#/$defs/property_value"
+        },
+        "easing": {
+          "$ref": "#/$defs/easing"
+        }
+      }
+    },
+    "property_curve": {
+      "type": "object",
+      "required": [
+        "keys",
+        "authored_default"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/property_key"
+          },
+          "description": "Sorted by canonical time and unique in it (spec 13.2). Enforced by PropertyCurve's constructor, which is also why this loads through that constructor rather than through a derived impl."
+        },
+        "authored_default": {
+          "description": "Spec 13.6: an empty property uses its authored default.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/property_value"
+            }
+          ]
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "parent",
+        "sibling_order",
+        "display_name",
+        "defaults"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "parent": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/uuid"
+            }
+          ],
+          "description": "null is a root. Roots are visited in NodeId order; children in `sibling_order` (spec 13.7)."
+        },
+        "sibling_order": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unique among one parent's children. Stored on roots but never consulted there."
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "defaults": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/property_path"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/property_value"
+          }
+        }
+      }
+    },
+    "track": {
+      "type": "object",
+      "required": [
+        "track_id",
+        "node_id",
+        "property",
+        "curve"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "track_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "node_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "property": {
+          "$ref": "#/$defs/property_path"
+        },
+        "curve": {
+          "$ref": "#/$defs/property_curve"
+        }
+      }
+    },
+    "marker": {
+      "type": "object",
+      "required": [
+        "position",
+        "label"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/frame_pos"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "scene": {
+      "type": "object",
+      "required": [
+        "name",
+        "nodes",
+        "tracks",
+        "markers",
+        "events"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nodes": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/uuid"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/node"
+          }
+        },
+        "tracks": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/uuid"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/track"
+          }
+        },
+        "markers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/marker"
+          },
+          "description": "Sorted by (position, label) and unique in that pair."
+        },
+        "events": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/uuid"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/event_definition"
+          },
+          "description": "Keyed by EventDefinitionId, so storage order is id-byte order and the canonical stream needs no sort step. This is the version 2 addition: a version 1 file has no such member and is read by anim_project::migrate::V1_TO_V2, which inserts an empty object per scene. There is no default for it in the Rust Deserialize, precisely so that an unmigrated version 1 file is refused instead of quietly loading as a version 2 document with nothing in it."
+        }
+      }
+    },
+    "asset_kind": {
+      "type": "string",
+      "enum": [
+        "image",
+        "audio",
+        "font",
+        "vector",
+        "rig",
+        "other"
+      ]
+    },
+    "manifest_record": {
+      "type": "object",
+      "required": [
+        "asset_id",
+        "content_hash",
+        "byte_length",
+        "kind",
+        "importer_version",
+        "dependencies",
+        "display_name",
+        "image"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "One text spelling of 32 bytes, which is also the object file name (spec 11.8, ADR-0005)."
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/asset_kind"
+        },
+        "importer_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/uuid"
+          },
+          "description": "Sorted by id and deduplicated at construction, with no self-edge -- the field spec 11.8 lists as `pub` but DECISIONS.md #22 and ADR-0005 Decision 6 make private (deviation row 9)."
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "image": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "anyOf": [
+            {
+              "$ref": "#/$defs/image_asset_claims"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The claims for an AssetKind::Image record, and null for every other kind. The null is present, not absent: AssetManifestEntry::new refuses an Image with no claims (MissingImageClaims) and refuses claims on a non-image (UnexpectedImageClaims), so the key's existence is not what carries the kind agreement -- its value is. Appended last so every earlier field keeps its byte position."
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "records"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "description": "The asset-schema version, embedded rather than flattened: the manifest keeps its own encoding and its own digest inside a document (ADR-0005 Consequence 5, closed by WP03)."
+        },
+        "records": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/uuid"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/manifest_record"
+          }
+        }
+      }
+    },
+    "easing_curve": {
+      "type": "object",
+      "required": [
+        "points"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "points": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 65,
+          "items": {
+            "$ref": "#/$defs/rational"
+          },
+          "description": "Normalized output at equally spaced input positions: points[i] is the eased fraction at input i/(n-1). The ceiling is anim_project::property::EASING_CURVE_MAX_POINTS and the floor is the two-sample rule in EasingCurve::new; the numbers appear here as well as in Rust because a schema that only tells a story is what this file's drift test exists to catch. The first value must be 0/1 and the last 1/1, which is what keeps a curve from displacing an authored key value. Interior values may overshoot, and that is deliberate: spec 32.7's dolly zoom and spec 42's anticipation both need a fraction that leaves the range and comes back."
+        }
+      },
+      "description": "Spec 13.7's \"declared easing using a versioned numeric algorithm\". The version is anim_project::property::EASING_ALGORITHM_VERSION, and it is hashed into a snapshot's pre-image rather than into this document's bytes: authored data does not change when the reading of it changes, but two snapshots that differ must not share a hash."
+    },
+    "event_kind": {
+      "type": "string",
+      "enum": [
+        "signal",
+        "camera_cut",
+        "audio_cue"
+      ],
+      "description": "What an authored event means downstream. Three variants, one per thing spec 13 itself asks an event to do: 13.5 step 5's camera and audio cues, and the generic cue that 13.7's ordering exists to deliver. WP13 and WP14 add theirs, and they reference an EventDefinitionId rather than inventing a second identity for the same reason (spec 28.8's effect_cue and audio_cue)."
+    },
+    "event_definition": {
+      "type": "object",
+      "required": [
+        "id",
+        "position",
+        "priority",
+        "source",
+        "kind",
+        "local_sequence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid",
+          "description": "The EventDefinitionId. Spec 13.7 derives the occurrence identity from this value and an occurrence index, so this is what an event log remembers."
+        },
+        "position": {
+          "$ref": "#/$defs/frame_pos"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "13.7's second sort term. Signed, and i32 because spec 13.8 declares it so: a negative priority is a legal authored choice meaning first."
+        },
+        "source": {
+          "$ref": "#/$defs/uuid",
+          "description": "13.7's third sort term and 13.8's non-optional source_id. It must name a node the same scene has; SceneData::validate refuses one that does not, rather than emitting an occurrence whose source no consumer can resolve."
+        },
+        "kind": {
+          "$ref": "#/$defs/event_kind"
+        },
+        "local_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "13.7's fourth sort term and the one it insists on: \"persisted or derived from a stable source key, never hash-map or filesystem enumeration\". Persisted."
+        }
+      },
+      "description": "One authored event. The five-term key of spec 13.7 is (event_time, priority, source_node_id, local_sequence, occurrence_id): this object supplies the first four and the last is derived by anim_scene::events."
+    },
+    "project_seed": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The random-stream seed as exactly 64 lowercase hex characters, which is anim_project::simulation's one accepted spelling and the shape spec 14.8's StreamKey.project_seed [u8; 32] is persisted in. Uppercase, hyphenated and short forms are refused by the decoder rather than normalized, for the reason ContentHash gives: a parser tolerant of a spelling the writer would not produce leaves one revision with two byte streams and so two digests. An all-zero seed is a legal authored value, not an absent one."
+    },
+    "simulation_settings": {
+      "type": "object",
+      "required": [
+        "ticks_per_frame",
+        "project_seed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ticks_per_frame": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Spec 14.2's nonzero u32. The simulation rate is frame_rate * ticks_per_frame, so this is part of what a saved project means rather than a per-session choice: whole frame f begins at tick f * N, an event at time t schedules to ceil(t * rate), and a rate supplied at runtime would let one revision replay to two different states, which is what 14.12's cadence and seek criteria exist to catch. Minimum is 1, not 0."
+        },
+        "project_seed": {
+          "$ref": "#/$defs/project_seed"
+        }
+      },
+      "description": "How this project steps and what its random streams are keyed by (spec 14.2, 14.7, 14.9). One section rather than two loose document fields because 14.2's path is ProjectDocument.simulation and the rate and the seed are one decision: changing either changes what a saved revision replays to. The frame rate is deliberately not here -- it is the document's frame_rate, and copying it would give one timeline two rate bindings that can disagree."
+    },
+    "image_color_space": {
+      "type": "string",
+      "enum": [
+        "srgb",
+        "linear",
+        "unclassified"
+      ],
+      "description": "The transfer function and primaries the stored samples are in, exactly as anim_assets::ImageColorSpace spells them: the lowercase string is both the persisted form and the canonical-encoding term, so a saved manifest and a hashed record state the same value with no integer table between them. 'unclassified' has two producers and no other meaning -- an embedded ICC profile the engine does not model, reported rather than approximated, and the V3_TO_V4 migration of a record that stored nothing. A renderer reading it refuses rather than assumes, because spec 15.11 forbids a silent transfer-function fallback."
+    },
+    "image_alpha": {
+      "type": "string",
+      "enum": [
+        "opaque",
+        "straight",
+        "unclassified"
+      ],
+      "description": "How the file's own alpha channel relates to its colour. PNG states this directly: its alpha channel is independent of the colour channels, so an RGBA cel is 'straight' by the definition of the format and not by inference from its pixels, and a JPEG has no alpha to be anything but 'opaque'. Premultiplication is NOT a metadata claim -- it is a decode choice the renderer makes against a DecoderConfiguration, which is why it appears in the derived-cache key and not here. 'unclassified' is written only by V3_TO_V4."
+    },
+    "image_asset_claims": {
+      "type": "object",
+      "required": [
+        "color_space",
+        "alpha"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "color_space": {
+          "$ref": "#/$defs/image_color_space"
+        },
+        "alpha": {
+          "$ref": "#/$defs/image_alpha"
+        }
+      },
+      "description": "What one stored image asserts about its own samples (anim_assets::ImageAssetClaims, fields in declaration order). Both terms are required together: a half-classified asset is the state a hand-edited file reaches and the state a renderer cannot draw from, so the record either says both or is not an image record."
+    }
+  }
+}

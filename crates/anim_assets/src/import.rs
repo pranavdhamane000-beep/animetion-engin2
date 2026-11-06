@@ -24,13 +24,23 @@
 //! Spec 11.12's "failure immediately before object rename" and 11.8's "failed imports
 //! leave no manifest entry" both land on that gap, and a lost write caught at step 3
 //! costs an orphaned temporary rather than an object whose record can never verify.
+//!
+//! Step 6 is where an image's colour and alpha claims come from (spec 15.2, and the
+//! ruling that came with schema version 2): they are read from the staged object,
+//! classified by the one header pass in `image.rs`, and recorded. Nothing downstream
+//! re-reads the header, because a second source for one fact is two renders for one
+//! project. The read happens *before* publication rather than after, which is the order
+//! that keeps 11.11's promise: an asset handed over as an `Image` whose bytes have no
+//! readable header fails with no record, no temporary, and no orphan object.
 
 use std::io::Read;
 
+use anim_core::diagnostic::Diagnostic;
 use anim_core::id::AssetId;
 use anim_core::io::atomic_replace::Replacement;
 
 use crate::hash::{ContentHash, StreamingHash};
+use crate::image::{classify_image, image_metadata, ImageAssetClaims};
 use crate::manifest::AssetKind;
 use crate::manifest::AssetManifestEntry;
 use crate::store::AssetStore;
@@ -43,6 +53,9 @@ use crate::{io_error, AssetError, CHUNK_SIZE};
 /// `cel-001.png` with different bytes get one digest each and neither file name
 /// appears in a path.
 ///
+/// This is spec 11.9's signature, which has no channel for a finding that is not a
+/// failure — see [`import_observed`] for the version that reports them.
+///
 /// # Errors
 ///
 /// [`AssetError::Cancelled`] if the source returns
@@ -54,7 +67,9 @@ use crate::{io_error, AssetError, CHUNK_SIZE};
 ///
 /// [`AssetError::Io`] for a staging or publication failure, [`AssetError::HashMismatch`]
 /// or [`AssetError::SizeMismatch`] when the staged bytes, or an existing object of the
-/// same digest, do not match what the stream says they are. Every one of these leaves
+/// same digest, do not match what the stream says they are, and [`AssetError::MalformedAsset`]
+/// or [`AssetError::UnsupportedDecoder`] when an `Image` record cannot be given claims
+/// because the stored bytes have no header this build reads. Every one of these leaves
 /// no record, no manifest change, and no temporary behind (spec 11.11).
 pub fn import<R: Read>(
     store: &AssetStore,
@@ -62,7 +77,40 @@ pub fn import<R: Read>(
     name: String,
     kind: AssetKind,
     importer_version: u32,
+    source: R,
+) -> Result<AssetManifestEntry, AssetError> {
+    import_observed(
+        store,
+        asset_id,
+        name,
+        kind,
+        importer_version,
+        source,
+        &mut |_| {},
+    )
+}
+
+/// [`import`], with a channel for the findings that are not failures.
+///
+/// Today there is exactly one: an image carrying an ICC profile this engine does not
+/// model, which is recorded as `Unclassified` and reported by name rather than guessed at
+/// (spec 15.11's ban on a silent transfer-function fallback). 11.9 gives `import` no
+/// parameter for it, and changing that signature is a spec change rather than this
+/// package's to make, so the reporting-capable caller — WP10's import UI, an export
+/// verification pass — takes this one. The record itself always carries the claim, so a
+/// caller that drops the finding loses the *warning*, never the fact.
+///
+/// # Errors
+///
+/// As [`import`].
+pub fn import_observed<R: Read>(
+    store: &AssetStore,
+    asset_id: AssetId,
+    name: String,
+    kind: AssetKind,
+    importer_version: u32,
     mut source: R,
+    observe: &mut dyn FnMut(Diagnostic),
 ) -> Result<AssetManifestEntry, AssetError> {
     let identifier = asset_id.to_canonical_string();
 
@@ -121,8 +169,19 @@ pub fn import<R: Read>(
         });
     }
 
-    // 4: the final path is a function of the digest alone.
+    // 4: the claims an `Image` record must carry, read from the staged file before it
+    // becomes an object. The order is what keeps 11.11's promise whole: a header that
+    // cannot be classified is a refusal, and a refusal that happens after the rename
+    // would leave a durable object with no record — legal under 11.8, but a store full of
+    // them is not what a failed import should look like.
     let content_hash = ContentHash::from_bytes(*staged_hash.as_bytes());
+    let image = match kind {
+        AssetKind::Image => Some(image_claims(staged.path(), &identifier, observe)?),
+        _ => None,
+    };
+
+    // 5: the final path is a function of the digest alone; either the object was already
+    // there and gets verified, or the temporary becomes it.
     let destination = store.object_path(&content_hash);
     if destination.is_file() {
         // Same content already stored: verify it, then discard the temporary.
@@ -131,24 +190,16 @@ pub fn import<R: Read>(
         // existing object is reported instead of silently inherited.
         verify_existing(&identifier, &content_hash, byte_length, &destination)?;
         drop(staged);
-        return AssetManifestEntry::new(
-            asset_id,
-            content_hash,
-            byte_length,
-            kind,
-            importer_version,
-            [],
-            name,
-        );
+    } else {
+        store.create_object_parent(&content_hash)?;
+        staged
+            .publish(&Replacement::create_only(&destination))
+            .map_err(|e| io_error("publish object", &destination, e.detail()))?;
     }
 
-    // 5: parent directories, then the non-overwriting rename.
-    store.create_object_parent(&content_hash)?;
-    staged
-        .publish(&Replacement::create_only(&destination))
-        .map_err(|e| io_error("publish object", &destination, e.detail()))?;
-
-    // 6: the record only after persistence.
+    // 6: the record only after persistence. Both branches above end with the object
+    // durable at `destination`, which is what lets this be one construction rather than
+    // two, and the claims came from the same bytes the object now holds.
     AssetManifestEntry::new(
         asset_id,
         content_hash,
@@ -157,7 +208,48 @@ pub fn import<R: Read>(
         importer_version,
         [],
         name,
+        image,
     )
+}
+
+/// Read and classify one stored image's colour and alpha claims.
+///
+/// The header pass is bounded by `image.rs`'s own scan budget rather than by the file
+/// size, so this is a few hundred bytes for an ordinary cel — the third read pass a
+/// large asset costs (DECISIONS.md #30) is bounded, unlike the two hashing passes.
+///
+/// # Errors
+///
+/// Whatever [`image_metadata`] reports for a path it cannot parse, with the asset id
+/// attached; `Io` if the object the store just named is not there.
+fn image_claims(
+    path: &std::path::Path,
+    asset_id: &str,
+    observe: &mut dyn FnMut(Diagnostic),
+) -> Result<ImageAssetClaims, AssetError> {
+    let metadata = image_metadata(path).map_err(|e| name_asset(e, asset_id))?;
+    let (claims, finding) = classify_image(&metadata, asset_id);
+    if let Some(finding) = finding {
+        observe(finding);
+    }
+    Ok(claims)
+}
+
+/// Attach the asset id to a header fault.
+///
+/// [`image_metadata`] is also called on a bare path by a resolver that has no record in
+/// hand, so it leaves the field empty and puts the path in the detail instead. Here the
+/// record being built *is* the answer to "which asset", and spec 7.4 wants that as a
+/// field rather than as a substring of a message.
+fn name_asset(error: AssetError, asset_id: &str) -> AssetError {
+    match error {
+        AssetError::MalformedAsset { kind, detail, .. } => AssetError::MalformedAsset {
+            asset_id: asset_id.to_owned(),
+            kind,
+            detail,
+        },
+        other => other,
+    }
 }
 
 /// The existing object at a content-addressed path must be the bytes the new stream

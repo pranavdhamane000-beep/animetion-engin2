@@ -35,8 +35,12 @@ pub use decode::{
     OpaqueMetadataDecoder, CURRENT_IMPORTER_VERSION, OPAQUE_KINDS,
 };
 pub use hash::{hash_bytes, hash_file, hash_stream, ContentHash, StreamingHash};
-pub use image::{image_metadata, ImageDecoder, ImageFormat, ImageMetadata, PixelLayout};
-pub use import::import;
+pub use image::{
+    classify_image, image_metadata, EmbeddedProfile, ImageAlpha, ImageAssetClaims,
+    ImageColorMarkers, ImageColorSpace, ImageDecoder, ImageFormat, ImageMetadata, PixelLayout,
+    UNMODELLED_PROFILE_CODE,
+};
+pub use import::{import, import_observed};
 pub use manifest::{
     manifest_digest, referenced_objects, AssetKind, AssetManifest, AssetManifestEntry,
     MANIFEST_DOMAIN, MANIFEST_SCHEMA_VERSION,
@@ -72,6 +76,11 @@ pub(crate) const CHUNK_SIZE: usize = 64 * 1024;
 /// repeated dependency or an inconsistent document, because the ids involved name
 /// different objects and a diagnostic that blames the wrong one sends the reader to
 /// the wrong record.
+///
+/// [`AssetError::MissingImageClaims`] and [`AssetError::UnexpectedImageClaims`] are the
+/// two that arrived with schema version 2's colour and alpha claims. Both are constructor
+/// refusals rather than file faults — the record disagrees with itself, not with its
+/// bytes — which is why neither one borrows `MalformedAsset`'s message.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AssetError {
     /// Filesystem failure, with the operation that attempted it. Never carries file
@@ -128,6 +137,21 @@ pub enum AssetError {
     #[error("asset dependency cycle: {path}")]
     DependencyCycle { asset_id: String, path: String },
 
+    /// An `Image` record built with no colour or alpha claims, which spec 15.2's
+    /// prerequisite makes a record the renderer cannot use. Kept separate from
+    /// `MalformedAsset` because the bytes may be a perfectly good PNG: what is broken is
+    /// the record, and the operator's remedy is to re-import, not to re-export the file.
+    #[error("asset {asset_id} is an image but records no colour space or alpha mode")]
+    MissingImageClaims { asset_id: String },
+
+    /// Colour and alpha claims attached to a kind that has none. Distinct from the
+    /// variant above and from `MalformedAsset` because it names a different object: the
+    /// file is whatever its bytes are, and it is the record's *kind* or its claims that
+    /// disagree — a manifest entry for a WAV saying "srgb straight" would send a
+    /// diagnostic to the audio path.
+    #[error("asset {asset_id} of kind {kind} cannot carry image colour and alpha claims")]
+    UnexpectedImageClaims { asset_id: String, kind: String },
+
     /// No decoder is registered for this kind, or the record's importer version is
     /// not one this build dispatches.
     #[error("no decoder registered for asset kind {kind} at importer version {importer_version}")]
@@ -175,6 +199,8 @@ impl AssetError {
             Self::MissingObject { .. } => "asset.missing_object",
             Self::DuplicateDependency { .. } => "asset.duplicate_dependency",
             Self::DependencyCycle { .. } => "asset.dependency_cycle",
+            Self::MissingImageClaims { .. } => "asset.missing_image_claims",
+            Self::UnexpectedImageClaims { .. } => "asset.unexpected_image_claims",
             Self::UnsupportedDecoder { .. } => "asset.unsupported_decoder",
             Self::MalformedAsset { .. } => "asset.malformed_asset",
             Self::Cancelled { .. } => "asset.cancelled",
@@ -240,6 +266,12 @@ impl AssetError {
             Self::DependencyCycle { asset_id, path } => base
                 .with_context("asset_id", asset_id.clone())
                 .with_context("cycle", path.clone()),
+            Self::MissingImageClaims { asset_id } => {
+                base.with_context("asset_id", asset_id.clone())
+            }
+            Self::UnexpectedImageClaims { asset_id, kind } => base
+                .with_context("asset_id", asset_id.clone())
+                .with_context("kind", kind.clone()),
             Self::UnsupportedDecoder {
                 kind,
                 importer_version,
@@ -313,6 +345,13 @@ mod tests {
                 asset_id: "a".into(),
                 path: "a -> b -> a".into(),
             },
+            AssetError::MissingImageClaims {
+                asset_id: "a".into(),
+            },
+            AssetError::UnexpectedImageClaims {
+                asset_id: "a".into(),
+                kind: "audio".into(),
+            },
             AssetError::UnsupportedDecoder {
                 kind: "image".into(),
                 importer_version: 3,
@@ -338,7 +377,7 @@ mod tests {
             .iter()
             .map(|e| e.code().as_str().to_owned())
             .collect();
-        assert_eq!(codes.len(), 14, "one arm per variant");
+        assert_eq!(codes.len(), 16, "one arm per variant");
         codes.sort();
         let before = codes.len();
         codes.dedup();
@@ -415,5 +454,19 @@ mod tests {
         };
         assert!(e.to_string().contains("vector"), "{e}");
         assert!(e.to_string().contains('7'), "{e}");
+        // The two claims refusals, which are the only way an operator hears about a
+        // record built the wrong way round: which asset, and what its kind said.
+        let e = AssetError::MissingImageClaims {
+            asset_id: "asset-9".into(),
+        };
+        assert!(e.to_string().contains("asset-9"), "{e}");
+        assert!(e.to_string().contains("image"), "{e}");
+        let e = AssetError::UnexpectedImageClaims {
+            asset_id: "asset-9".into(),
+            kind: "audio".into(),
+        };
+        for fragment in ["asset-9", "audio"] {
+            assert!(e.to_string().contains(fragment), "{e}");
+        }
     }
 }

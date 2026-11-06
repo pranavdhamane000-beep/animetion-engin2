@@ -297,6 +297,7 @@ mod tests {
 
     use super::*;
     use crate::hash::hash_bytes;
+    use crate::image::{ImageAlpha, ImageAssetClaims, ImageColorSpace};
     use crate::manifest::AssetKind;
     use uuid::Uuid;
 
@@ -332,6 +333,13 @@ mod tests {
             1,
             deps.to_vec(),
             format!("{label}.png"),
+            // The claims these tests hand-build describe a cel whose header said sRGB and
+            // carried an alpha channel — what `classify_image` concludes for a RGBA PNG,
+            // and the only thing that makes the record legal at all.
+            Some(ImageAssetClaims {
+                color_space: ImageColorSpace::Srgb,
+                alpha: ImageAlpha::Straight,
+            }),
         )
         .unwrap()
     }

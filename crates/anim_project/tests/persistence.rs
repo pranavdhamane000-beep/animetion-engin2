@@ -53,6 +53,16 @@ fn namespace() -> Uuid {
     Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap()
 }
 
+/// The claims a hand-built `Image` record must carry to be legal at all (spec 15.2,
+/// DECISIONS.md #40 ruling 2). `AssetKind::Other` records take `None`, which is the same
+/// rule from the other side, so the two spellings below are not interchangeable.
+fn claims() -> Option<anim_assets::ImageAssetClaims> {
+    Some(anim_assets::ImageAssetClaims {
+        color_space: anim_assets::ImageColorSpace::Srgb,
+        alpha: anim_assets::ImageAlpha::Straight,
+    })
+}
+
 fn project_id() -> ProjectId {
     ProjectId::derive(&namespace(), b"persistence-fixture")
 }
@@ -83,6 +93,7 @@ fn rich_document(revision: u64) -> ProjectDocument {
             1,
             [],
             "sheet-001",
+            None,
         )
         .unwrap(),
     );
@@ -95,6 +106,7 @@ fn rich_document(revision: u64) -> ProjectDocument {
             1,
             [sheet],
             "cel-001",
+            claims(),
         )
         .unwrap(),
     );

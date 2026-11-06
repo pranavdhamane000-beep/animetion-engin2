@@ -12,10 +12,23 @@
 //! PNG's per-chunk CRC would catch corruption introduced by the authoring tool before
 //! import, which is a different failure with a different owner, and paying a second
 //! full pass over every image to cover it is the wrong trade.
+//!
+//! Colour and alpha are classified here, from the same single header pass, and the
+//! result is what [`crate::import`] records in the manifest. Spec 15.2 makes "image
+//! assets carry color-space and alpha metadata" a prerequisite of the renderer, and the
+//! ruling recorded with the schema bump is that the metadata is authored data fixed at
+//! import rather than re-read from the file at render time: a second reading of one fact
+//! beside the manifest's gives one project two render outputs, which is the failure
+//! class this engine exists to prevent. That is why the rules below end in a *decision*
+//! written into hashed bytes, and why the fallback for a profile this engine does not
+//! model is a report rather than a guess.
 
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+
+use anim_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
+use serde::{Deserialize, Serialize};
 
 use crate::decode::{AssetMetadata, Decoder, CURRENT_IMPORTER_VERSION};
 use crate::manifest::AssetKind;
@@ -80,6 +93,149 @@ pub enum PixelLayout {
     Unknown,
 }
 
+/// An embedded colour profile this engine does not model, as the header declared it.
+///
+/// Two shapes rather than one `Option<String>` because the formats differ in what they
+/// state: PNG's `iCCP` carries the author's profile name as text, and JPEG's `APP2`
+/// carries only the profile bytes inside a segment whose identifier is fixed. Recording a
+/// name for the second case would be inventing one, and the whole point of this type is
+/// that an un-modelled profile is *reported* — so the report says exactly what the file
+/// says and no more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmbeddedProfile {
+    /// `iCCP`: the chunk's own profile-name field.
+    Named(String),
+    /// `c2PC`, or a JPEG `APP2` segment with the `ICC_PROFILE` identifier: a profile
+    /// whose framing states no name.
+    Unnamed,
+}
+
+impl EmbeddedProfile {
+    /// How the diagnostic refers to this profile.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Named(name) => name.clone(),
+            Self::Unnamed => "an unnamed embedded profile".to_owned(),
+        }
+    }
+}
+
+/// The colour-intent markers a header carried, kept as facts rather than as a conclusion.
+///
+/// The classifier below is the only place that turns these into an
+/// [`ImageColorSpace`], so the parser stays free of policy and a rule change never
+/// requires re-reading the file format.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageColorMarkers {
+    /// PNG `sRGB`: the author declared the transfer function and the primaries.
+    pub srgb: bool,
+    /// PNG `gAMA`, in the format's 1/100 000 units, so 100 000 is gamma 1.0.
+    pub gamma: Option<u32>,
+    /// An embedded ICC profile, which this engine models and therefore refuses to name
+    /// a colour space for.
+    pub icc_profile: Option<EmbeddedProfile>,
+}
+
+/// The transfer function and primaries a stored image's pixels are in.
+///
+/// The lowercase spelling is the persisted and the canonical form, exactly as
+/// [`AssetKind`] uses its own, so the string in a saved manifest and the string in a
+/// hashed record are one value with no table between them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageColorSpace {
+    Srgb,
+    Linear,
+    /// A profile this engine does not model, or a claim it declined to guess.
+    ///
+    /// Produced by exactly two rules: an embedded profile at import, and the version 3 to
+    /// version 4 migration of a file that recorded nothing. It is never a rendering-time
+    /// approximation, and a renderer reading it must report rather than assume — spec
+    /// 15.11's prohibition on a silent transfer-function fallback.
+    Unclassified,
+}
+
+impl ImageColorSpace {
+    /// The canonical spelling, identical to the JSON form.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb",
+            Self::Linear => "linear",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+impl std::fmt::Display for ImageColorSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How an image's alpha channel combines with its colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageAlpha {
+    /// No alpha channel, so every pixel is fully opaque — the whole of what a JPEG can be.
+    Opaque,
+    /// Alpha as authored, with the colour *not* multiplied by it.
+    ///
+    /// PNG states this directly: its alpha channel is independent of the colour channels,
+    /// so a cel stored as `RGBA` is straight by definition of the format and not by
+    /// inference from its contents. Premultiplication is a decode choice for the renderer
+    /// to make against a [`crate::decode::DecoderConfiguration`], which is why it is a
+    /// cache-key axis and not a metadata claim.
+    Straight,
+    /// Alpha mode not recorded, which only the version 3 to version 4 migration writes.
+    ///
+    /// Nothing that classifies a real file can produce this: PNG and JPEG both state
+    /// whether an alpha channel exists, so an unknown alpha would be a parser that gave
+    /// up rather than a header that did not say.
+    Unclassified,
+}
+
+impl ImageAlpha {
+    /// The canonical spelling, identical to the JSON form.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Opaque => "opaque",
+            Self::Straight => "straight",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+impl std::fmt::Display for ImageAlpha {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the manifest records about one image asset's pixels.
+///
+/// Two enums, no invariants to normalize, so the field is `pub` in
+/// [`crate::manifest::AssetManifestEntry`] the way `kind` is and not private the way
+/// `dependencies` is (DECISIONS.md #22's test: one value, one spelling).
+///
+/// There is no `as_str()` here because the pair has no single canonical spelling: the two
+/// halves are encoded, persisted and hashed separately, in that order, which is what
+/// keeps one claim change from disturbing the other's byte position. `Display` is the
+/// readable form for a report and reaches nothing on a disk or in a digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAssetClaims {
+    pub color_space: ImageColorSpace,
+    pub alpha: ImageAlpha,
+}
+
+impl std::fmt::Display for ImageAssetClaims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.color_space, self.alpha)
+    }
+}
+
 /// The format-level facts of one stored image.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageMetadata {
@@ -93,7 +249,89 @@ pub struct ImageMetadata {
     /// PNG Adam7 or JPEG progressive. Interlaced sources need a different decode
     /// strategy, so WP06 must know before it commits to a pass.
     pub interlaced: bool,
+    /// The colour-intent chunks the header scan found on the way to the first `IDAT`.
+    pub color_markers: ImageColorMarkers,
 }
+
+/// The diagnostic code an un-modelled profile is reported under (spec 7.4's stable
+/// category, append-only like every other code in this crate).
+pub const UNMODELLED_PROFILE_CODE: &str = "asset.unmodelled_colour_profile";
+
+/// Classify one parsed header into the claims a manifest record carries.
+///
+/// Returns the claims and, when the colour space is `Unclassified` *because a profile was
+/// found*, the finding that names it. The two are produced by one rule body rather than
+/// two functions so that a record can never claim `Unclassified` with no report beside it,
+/// nor report a profile it did not record.
+///
+/// `asset_id` is the record's own id, which `image_metadata` cannot know because it is
+/// also called on a bare path; the caller that is building a record passes it here so the
+/// diagnostic answers "which asset" as a field rather than as a substring (spec 7.4).
+#[must_use]
+pub fn classify_image(
+    metadata: &ImageMetadata,
+    asset_id: &str,
+) -> (ImageAssetClaims, Option<Diagnostic>) {
+    let markers = &metadata.color_markers;
+
+    // An embedded profile wins over every other declaration, including a co-existing
+    // `sRGB` chunk, and that ordering is the reason this is a rule and not a lookup.
+    // Tools routinely write both, and the two can disagree; choosing one would be
+    // guessing which the author meant, which is what [`PixelLayout::Unknown`]'s comment
+    // refuses on the layout axis and this refuses on the colour axis.
+    let (color_space, finding) = if let Some(profile) = &markers.icc_profile {
+        let diagnostic = Diagnostic::new(
+            DiagnosticCode::new(UNMODELLED_PROFILE_CODE)
+                .unwrap_or_else(DiagnosticCode::unspecified),
+            DiagnosticSeverity::Warning,
+            format!(
+                "asset {asset_id} carries {description}, which this engine does not model; \
+                 its colour space is recorded as unclassified rather than approximated",
+                description = profile.describe()
+            ),
+        )
+        .with_context("asset_id", asset_id.to_owned())
+        .with_context("profile", profile.describe())
+        .with_context("format", metadata.format.to_string());
+        (ImageColorSpace::Unclassified, Some(diagnostic))
+    } else if markers.srgb {
+        (ImageColorSpace::Srgb, None)
+    } else if markers.gamma == Some(GAMMA_LINEAR) {
+        // `gAMA` 100000 is the file saying "these values are the scene-linear ones",
+        // which is a declaration of the transfer function and the only one `gAMA` alone
+        // can support.
+        (ImageColorSpace::Linear, None)
+    } else {
+        // The default rule, and it is a *decision written into hashed data at import*,
+        // not an inference a renderer makes later. An unmarked cel in an animation
+        // pipeline is an sRGB asset; that has been the format's de facto convention
+        // since PNG and JPEG shipped no marker for the case, and choosing anything else
+        // would be a guess in the other direction.
+        //
+        // Why the distinction matters: spec 15.11 forbids a renderer silently
+        // substituting a transfer function, and a render-time guess is exactly that —
+        // the same file would render differently under a changed rule, invisibly. Because
+        // the answer is recorded in the record, a later package that revises this default
+        // has to bump `MANIFEST_SCHEMA_VERSION` and re-import, so the change shows up in
+        // every digest it affects. A `gAMA` that is neither 100000 nor absent lands here
+        // too: gamma without primaries names a curve and not a colour space, so it is not
+        // a claim this type can carry.
+        (ImageColorSpace::Srgb, None)
+    };
+
+    // Nothing in this function emits `ImageAlpha::Unclassified`: both formats state
+    // whether an alpha channel exists, so the variant's only producer is the migration.
+    let alpha = if metadata.has_alpha {
+        ImageAlpha::Straight
+    } else {
+        ImageAlpha::Opaque
+    };
+
+    (ImageAssetClaims { color_space, alpha }, finding)
+}
+
+/// `gAMA`'s value for a gamma of exactly 1.0, in the format's 1/100 000 units.
+const GAMMA_LINEAR: u32 = 100_000;
 
 /// Read one stored image's metadata, sniffing the format from its signature.
 ///
@@ -174,10 +412,15 @@ pub fn png_metadata<R: Read>(source: &mut R) -> Result<ImageMetadata, String> {
         other => return Err(format!("unknown PNG colour type {other}")),
     };
     let mut has_alpha = matches!(color_type, 4 | 6);
+    let mut color_markers = ImageColorMarkers::default();
 
     // A palette or gray image with `tRNS` is semi-transparent. The chunk appears
     // before the first `IDAT`, so scanning until then is enough, and the scan is
-    // bounded by chunk size rather than by file size.
+    // bounded by chunk size rather than by file size. The colour chunks sit in the same
+    // region — PNG puts `sRGB`, `gAMA`, `iCCP` and `c2PC` before the image data, before
+    // any chunk that IDAT-compressed pixels could be confused with — so this one pass
+    // reads layout, alpha and colour intent together and there is no second header
+    // parser to keep in step with this one.
     while let Ok((length, chunk_type)) = chunk_header(source) {
         match chunk_type.as_slice() {
             b"IDAT" | b"IEND" => break,
@@ -185,6 +428,28 @@ pub fn png_metadata<R: Read>(source: &mut R) -> Result<ImageMetadata, String> {
                 if !read_chunk_payload(source, length, 0)?.is_empty() {
                     has_alpha = true;
                 }
+            }
+            b"sRGB" => {
+                // One byte: the rendering intent. The payload's exact size is part of
+                // the format, so a chunk that claims another length is a corrupt file
+                // rather than a marker to be interpreted loosely.
+                read_chunk_payload(source, length, 1)?;
+                color_markers.srgb = true;
+            }
+            b"gAMA" => {
+                let payload = read_chunk_payload(source, length, 4)?;
+                color_markers.gamma = Some(u32::from_be_bytes([
+                    payload[0], payload[1], payload[2], payload[3],
+                ]));
+            }
+            b"iCCP" => {
+                let payload = read_chunk_payload(source, length, 0)?;
+                color_markers.icc_profile =
+                    Some(EmbeddedProfile::Named(icc_profile_name(&payload)?));
+            }
+            b"c2PC" => {
+                read_chunk_payload(source, length, 0)?;
+                color_markers.icc_profile = Some(EmbeddedProfile::Unnamed);
             }
             _ => skip_remaining(source, length)?,
         }
@@ -198,6 +463,7 @@ pub fn png_metadata<R: Read>(source: &mut R) -> Result<ImageMetadata, String> {
         layout,
         has_alpha,
         interlaced,
+        color_markers,
     })
 }
 
@@ -209,6 +475,7 @@ pub fn jpeg_metadata<R: Read>(source: &mut R) -> Result<ImageMetadata, String> {
         return Err("signature is not JPEG".to_owned());
     }
 
+    let mut color_markers = ImageColorMarkers::default();
     let mut scanned: u64 = 2;
     loop {
         let code = loop {
@@ -264,18 +531,74 @@ pub fn jpeg_metadata<R: Read>(source: &mut R) -> Result<ImageMetadata, String> {
                 // background, which is a decision above this file.
                 has_alpha: false,
                 interlaced: code == 0xC2,
+                color_markers,
             });
         }
-        // Standalone markers (0x01, RSTn, SOI, EOI) carry no length; anything else
-        // must be skipped rather than parsed, so that an APP2 ICC profile of any size
-        // cannot be mistaken for a frame header.
-        if !matches!(code, 0x01 | 0xD0..=0xD9) {
+        // An `APP2` ICC profile is the one segment that carries a fact this file records
+        // rather than skips, so its identifier is read and the rest of the profile is
+        // discarded without being buffered — the profile is the largest segment an
+        // ordinary photo carries and none of its bytes are needed here.
+        if code == 0xE2 {
+            let consumed = skip_app2_segment(source, &mut color_markers)?;
+            scanned = scanned.saturating_add(consumed);
+        } else if !matches!(code, 0x01 | 0xD0..=0xD9) {
+            // Standalone markers (0x01, RSTn, SOI, EOI) carry no length; anything else
+            // must be skipped rather than parsed, so that an APP2 ICC profile of any size
+            // cannot be mistaken for a frame header.
             scanned = scanned.saturating_add(skip_segment(source)?);
         }
         if scanned > MAX_HEADER_SCAN {
             return Err("no start-of-frame marker within the header budget".to_owned());
         }
     }
+}
+
+/// The `ICC_PROFILE` identifier an `APP2` segment starts with, as the format fixes it.
+const ICC_PROFILE_IDENTIFIER: [u8; 12] = *b"ICC_PROFILE\0";
+
+/// Consume an `APP2` segment, recording it as an embedded profile if it claims to be one.
+///
+/// Returns the bytes consumed including the length field, so the caller's scan budget
+/// accounts for a profile exactly as it accounts for a skipped segment.
+fn skip_app2_segment<R: Read>(
+    source: &mut R,
+    markers: &mut ImageColorMarkers,
+) -> Result<u64, String> {
+    let payload = segment_length(source)?;
+    let mut identifier = [0u8; ICC_PROFILE_IDENTIFIER.len()];
+    let read = std::cmp::min(payload, identifier.len());
+    if read > 0 {
+        read_exact_bounded(source, &mut identifier[..read])?;
+    }
+    let remaining = payload - read;
+    if remaining > 0 {
+        discard(source, remaining as u64)?;
+    }
+    if read == identifier.len() && identifier == ICC_PROFILE_IDENTIFIER {
+        markers.icc_profile = Some(EmbeddedProfile::Unnamed);
+    }
+    Ok(payload as u64 + 2)
+}
+
+/// The profile name an `iCCP` chunk declares: the payload is that name as text, a `NUL`,
+/// a compression method, then the compressed profile.
+///
+/// PNG constrains the name to 1 to 79 bytes, and a chunk with no terminator inside that
+/// window is not a profile the file can be trusted to describe. Latin-1 is the format's
+/// own charset for this field, which for a name a report shows is close enough to be
+/// carried as the bytes the author wrote rather than re-encoded into a guess.
+fn icc_profile_name(payload: &[u8]) -> Result<String, String> {
+    let terminator = payload
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| "iCCP chunk has no profile-name terminator".to_owned())?;
+    if terminator == 0 {
+        return Err("iCCP chunk declares an empty profile name".to_owned());
+    }
+    Ok(payload[..terminator]
+        .iter()
+        .map(|byte| char::from(*byte))
+        .collect())
 }
 
 /// One PNG chunk's declared length and four-byte type, big-endian as the format says.
@@ -744,5 +1067,302 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let e = image_metadata(&dir.path().join("absent.png")).unwrap_err();
         assert!(matches!(e, AssetError::Io { .. }), "{e}");
+    }
+
+    /// A PNG with one extra chunk between `IHDR` and `IDAT`, which is where the format
+    /// puts every colour and transparency marker.
+    fn png_with(color_type: u8, extra: (&[u8; 4], &[u8])) -> Vec<u8> {
+        let mut out = ImageFormat::Png.signature().to_vec();
+        out.extend_from_slice(&chunk(b"IHDR", &ihdr(64, 32, 8, color_type, 0)));
+        out.extend_from_slice(&chunk(extra.0, extra.1));
+        out.extend_from_slice(&chunk(b"IDAT", &[0u8; 16]));
+        out.extend_from_slice(&chunk(b"IEND", &[]));
+        out
+    }
+
+    fn claims_of(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> ImageAssetClaims {
+        let meta = image_metadata(&write(dir, name, bytes)).unwrap();
+        let (claims, _) = classify_image(&meta, "asset-under-test");
+        claims
+    }
+
+    #[test]
+    fn a_declared_srgb_chunk_and_the_unmarked_default_are_the_same_answer_differently_earned() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            claims_of(&dir, "declared.png", &png_with(6, (b"sRGB", &[0]))),
+            ImageAssetClaims {
+                color_space: ImageColorSpace::Srgb,
+                alpha: ImageAlpha::Straight,
+            }
+        );
+        // The default rule: no colour chunk of any kind. Same *value*, and the point of
+        // asserting both is that the value is recorded either way, so a later change to
+        // this one rule is a schema event and not a re-reading of the same file.
+        assert_eq!(
+            claims_of(&dir, "unmarked.png", &png(6, false)),
+            ImageAssetClaims {
+                color_space: ImageColorSpace::Srgb,
+                alpha: ImageAlpha::Straight,
+            }
+        );
+    }
+
+    #[test]
+    fn gamma_one_is_linear_and_any_other_gamma_is_not_a_colour_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let linear = png_with(2, (b"gAMA", &100_000u32.to_be_bytes()));
+        assert_eq!(
+            claims_of(&dir, "linear.png", &linear).color_space,
+            ImageColorSpace::Linear
+        );
+        // 45 455 is the format's spelling of gamma 2.2. It names a curve, not primaries,
+        // so no rule fires and the default answers — which is why `Linear` has exactly one
+        // producer and a file cannot reach it by being merely nonlinear.
+        assert_eq!(
+            claims_of(
+                &dir,
+                "gamma22.png",
+                &png_with(2, (b"gAMA", &45_455u32.to_be_bytes()))
+            )
+            .color_space,
+            ImageColorSpace::Srgb
+        );
+        // Alpha is orthogonal: a linear image with no alpha channel is `Opaque`.
+        assert_eq!(
+            claims_of(&dir, "linear.png", &linear).alpha,
+            ImageAlpha::Opaque
+        );
+    }
+
+    #[test]
+    fn an_embedded_profile_is_refused_and_named_rather_than_approximated() {
+        let dir = tempfile::tempdir().unwrap();
+        // `iCCP`'s payload is the author's profile name, a NUL, a compression method,
+        // then the profile itself.
+        let mut profile = b"Adobe RGB (1998)".to_vec();
+        profile.push(0);
+        profile.push(0);
+        profile.extend_from_slice(&[0u8; 32]);
+        let meta =
+            image_metadata(&write(&dir, "wide.png", &png_with(6, (b"iCCP", &profile)))).unwrap();
+        let (claims, finding) = classify_image(&meta, "asset-42");
+        assert_eq!(claims.color_space, ImageColorSpace::Unclassified);
+        let finding = finding.expect("a refusal to classify is a reportable finding");
+        assert_eq!(
+            finding.code.as_str(),
+            "asset.unmodelled_colour_profile",
+            "{finding:?}"
+        );
+        assert_eq!(
+            finding.severity,
+            anim_core::diagnostic::DiagnosticSeverity::Warning,
+            "the import succeeded and said what it does not know"
+        );
+        assert!(
+            finding
+                .context
+                .values()
+                .any(|value| value == "Adobe RGB (1998)"),
+            "the profile is named as the file named it: {finding:?}"
+        );
+        assert!(
+            finding.context.values().any(|value| value == "asset-42"),
+            "and so is the asset: {finding:?}"
+        );
+
+        // `c2PC` carries a profile with no name field, so the finding says so rather than
+        // inventing one.
+        let meta = image_metadata(&write(
+            &dir,
+            "wide2.png",
+            &png_with(6, (b"c2PC", &[0u8; 8])),
+        ))
+        .unwrap();
+        let (claims, finding) = classify_image(&meta, "asset-43");
+        assert_eq!(claims.color_space, ImageColorSpace::Unclassified);
+        let finding = finding.expect("an unnamed profile is still an un-modelled profile");
+        assert!(
+            finding.message.contains("unnamed embedded profile"),
+            "{}",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn a_profile_beats_a_co_existing_srgb_declaration() {
+        // Tools write both. Choosing the chunk would be choosing which of two conflicting
+        // claims to believe, and the answer this engine gives is that it does not choose:
+        // the profile is the one it cannot model, so the file is reported.
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = ImageFormat::Png.signature().to_vec();
+        out.extend_from_slice(&chunk(b"IHDR", &ihdr(8, 8, 8, 6, 0)));
+        out.extend_from_slice(&chunk(b"sRGB", &[0]));
+        out.extend_from_slice(&chunk(
+            b"iCCP",
+            &[b"Display P3".to_vec(), vec![0, 0, 1, 2, 3]].concat(),
+        ));
+        out.extend_from_slice(&chunk(b"IDAT", &[0u8; 4]));
+        let meta = image_metadata(&write(&dir, "both.png", &out)).unwrap();
+        let (claims, finding) = classify_image(&meta, "both");
+        assert_eq!(claims.color_space, ImageColorSpace::Unclassified);
+        assert!(finding.is_some());
+    }
+
+    #[test]
+    fn nothing_that_reads_a_file_invents_an_unknown_alpha() {
+        // `Unclassified` has exactly two producers: an embedded profile on the colour axis,
+        // and the document migration on both. These fixtures span every header shape this
+        // parser can return that is not a profile, and neither answer is ever unknown,
+        // because both formats state whether an alpha channel exists and the colour rule
+        // ends in a default rather than in a shrug.
+        let dir = tempfile::tempdir().unwrap();
+        let cases: Vec<Vec<u8>> = vec![
+            png(0, false),
+            png(2, false),
+            png(3, false),
+            png(3, true),
+            png(4, false),
+            png(6, false),
+            png_with(6, (b"sRGB", &[0])),
+            png_with(2, (b"gAMA", &100_000u32.to_be_bytes())),
+            {
+                let mut out = vec![0xFF, 0xD8];
+                out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x08, 8, 0x00, 0x10, 0x00, 0x10, 3]);
+                out
+            },
+        ];
+        for (index, bytes) in cases.iter().enumerate() {
+            let name = if index >= 8 { "j.jpg" } else { "c.png" };
+            let meta = image_metadata(&write(&dir, name, bytes)).unwrap();
+            let (claims, finding) = classify_image(&meta, "asset");
+            assert_ne!(
+                claims.alpha,
+                ImageAlpha::Unclassified,
+                "case {index} was classified, so it is known"
+            );
+            assert_ne!(
+                claims.color_space,
+                ImageColorSpace::Unclassified,
+                "case {index} carries no profile"
+            );
+            assert!(
+                finding.is_none(),
+                "and nothing here has a finding to report: case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn alpha_follows_the_channel_the_header_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        for (color_type, trns, alpha) in [
+            (0u8, false, ImageAlpha::Opaque),
+            (2, false, ImageAlpha::Opaque),
+            (3, false, ImageAlpha::Opaque),
+            (3, true, ImageAlpha::Straight),
+            (4, false, ImageAlpha::Straight),
+            (6, false, ImageAlpha::Straight),
+        ] {
+            assert_eq!(
+                claims_of(&dir, "a.png", &png(color_type, trns)).alpha,
+                alpha,
+                "colour type {color_type} with tRNS={trns}"
+            );
+        }
+
+        // JPEG: no alpha in any form, so `Opaque` is the format's answer and not a guess.
+        let mut out = vec![0xFF, 0xD8];
+        out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x08, 8, 0x00, 0x10, 0x00, 0x10, 3]);
+        assert_eq!(claims_of(&dir, "flat.jpg", &out).alpha, ImageAlpha::Opaque);
+    }
+
+    #[test]
+    fn a_jpeg_app2_profile_is_unnamed_and_the_default_covers_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        // A real ICC-bearing export: APP2 with the format's fixed identifier, then the
+        // profile bytes, then the frame.
+        let mut out = vec![0xFF, 0xD8];
+        let profile = [b"ICC_PROFILE\0".to_vec(), vec![1, 1, 0], vec![9u8; 40]].concat();
+        let declared = (profile.len() + 2) as u16;
+        out.extend_from_slice(&[0xFF, 0xE2]);
+        out.extend_from_slice(&declared.to_be_bytes());
+        out.extend_from_slice(&profile);
+        out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x08, 8, 0x00, 0x10, 0x00, 0x10, 3]);
+        let meta = image_metadata(&write(&dir, "c.jpg", &out)).unwrap();
+        let (claims, finding) = classify_image(&meta, "jpeg-with-profile");
+        assert_eq!(claims.color_space, ImageColorSpace::Unclassified);
+        assert!(finding.is_some(), "and the report says which one: {claims}");
+
+        // The same file with an Exif APP1 instead is an ordinary unmarked JPEG.
+        let mut out = vec![0xFF, 0xD8];
+        out.extend_from_slice(&[0xFF, 0xE1, 0x00, 0x0A]);
+        out.extend_from_slice(b"Exif_xx\0\0");
+        out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x08, 8, 0x00, 0x10, 0x00, 0x10, 3]);
+        let meta = image_metadata(&write(&dir, "d.jpg", &out)).unwrap();
+        let (claims, finding) = classify_image(&meta, "jpeg-exif-only");
+        assert_eq!(claims.color_space, ImageColorSpace::Srgb);
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn claim_spellings_are_one_string_for_json_and_for_hashing() {
+        for (space, spelling) in [
+            (ImageColorSpace::Srgb, "srgb"),
+            (ImageColorSpace::Linear, "linear"),
+            (ImageColorSpace::Unclassified, "unclassified"),
+        ] {
+            assert_eq!(space.as_str(), spelling);
+            assert_eq!(space.to_string(), spelling);
+            let json = serde_json::to_string(&space).unwrap();
+            assert_eq!(json, format!("\"{spelling}\""));
+            assert_eq!(
+                serde_json::from_str::<ImageColorSpace>(&json).unwrap(),
+                space
+            );
+        }
+        for (alpha, spelling) in [
+            (ImageAlpha::Opaque, "opaque"),
+            (ImageAlpha::Straight, "straight"),
+            (ImageAlpha::Unclassified, "unclassified"),
+        ] {
+            assert_eq!(alpha.as_str(), spelling);
+            assert_eq!(alpha.to_string(), spelling);
+            let json = serde_json::to_string(&alpha).unwrap();
+            assert_eq!(json, format!("\"{spelling}\""));
+            assert_eq!(serde_json::from_str::<ImageAlpha>(&json).unwrap(), alpha);
+        }
+
+        // The pair serializes as the two fields and round-trips, which is what lets the
+        // migration write it as JSON and the loader read it back through the constructor.
+        let claims = ImageAssetClaims {
+            color_space: ImageColorSpace::Unclassified,
+            alpha: ImageAlpha::Unclassified,
+        };
+        let json = serde_json::to_string(&claims).unwrap();
+        assert_eq!(
+            json,
+            r#"{"color_space":"unclassified","alpha":"unclassified"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ImageAssetClaims>(&json).unwrap(),
+            claims
+        );
+    }
+
+    #[test]
+    fn a_profile_chunk_that_cannot_be_read_is_a_malformed_asset() {
+        // `iCCP` with no name terminator is not a profile the file can be trusted to
+        // describe; refusing it is the same rule that refuses an unknown colour type, and
+        // it is why the record's claims are only ever about a header that parsed.
+        let dir = tempfile::tempdir().unwrap();
+        let e = image_metadata(&write(
+            &dir,
+            "e.png",
+            &png_with(6, (b"iCCP", b"no terminator")),
+        ))
+        .unwrap_err();
+        assert!(matches!(e, AssetError::MalformedAsset { .. }), "{e}");
+        assert!(e.to_string().contains("iCCP"), "{e}");
     }
 }

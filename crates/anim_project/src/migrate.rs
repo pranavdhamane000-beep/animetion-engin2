@@ -20,9 +20,11 @@ use crate::{ProjectError, Result};
 /// The asset manifest version this build reads.
 ///
 /// Equal to [`anim_assets::MANIFEST_SCHEMA_VERSION`] today, and stated separately
-/// because they can disagree legitimately: `anim_assets` writes version 2 records
-/// before this crate knows how to migrate them *from* 1, and the direction that must
-/// never happen silently is reading a file whose manifest version is outside this list.
+/// because they can disagree legitimately: `anim_assets` writes a new record version
+/// before this crate knows how to migrate files *from* the previous one, and the
+/// direction that must never happen silently is reading a file whose manifest version is
+/// outside this list. Version 2 is the record with the `image` claims, and
+/// [`V3_TO_V4`] is the step that reaches it.
 pub const SUPPORTED_MANIFEST_SCHEMA_VERSIONS: &[u32] = &[anim_assets::MANIFEST_SCHEMA_VERSION];
 
 // The document version this build reads is `PROJECT_SCHEMA_VERSION` exactly, and there
@@ -45,18 +47,20 @@ pub struct MigrationStep {
 /// The migration chain from any supported version to
 /// [`PROJECT_SCHEMA_VERSION`].
 ///
-/// Two steps. Version 1 is WP03's shape and is on disk in every project saved before WP04,
+/// Three steps. Version 1 is WP03's shape and is on disk in every project saved before WP04,
 /// which added the event section spec 13.5 step 1 validates and 13.7 orders. Version 2 is
 /// WP04's and is on disk in every project saved before WP05, which added the simulation
-/// section spec 14.2 makes a prerequisite. Spec 12.5's step 9 asks for a step per version
-/// pair and a fixture per version, and both exist twice over now: `V1_TO_V2` with
-/// `tests/fixtures/project_v1.anim.json`, `V2_TO_V3` with
-/// `tests/fixtures/project_v2.anim.json`.
+/// section spec 14.2 makes a prerequisite. Version 3 is WP05's and is on disk in every
+/// project saved before WP06, which added the image colour and alpha claims spec 15.2
+/// makes a prerequisite. Spec 12.5's step 9 asks for a step per version pair and a fixture
+/// per version, and all three have both: `V1_TO_V2` with `tests/fixtures/project_v1.anim.json`,
+/// `V2_TO_V3` with `tests/fixtures/project_v2.anim.json`, `V3_TO_V4` with
+/// `tests/fixtures/project_v3.anim.json`.
 pub const fn chain() -> &'static [MigrationStep] {
     CHAIN
 }
 
-const CHAIN: &[MigrationStep] = &[V1_TO_V2, V2_TO_V3];
+const CHAIN: &[MigrationStep] = &[V1_TO_V2, V2_TO_V3, V3_TO_V4];
 
 /// The version 1 to version 2 step.
 ///
@@ -87,6 +91,26 @@ const V2_TO_V3: MigrationStep = MigrationStep {
     to: 3,
     description: "v2 to v3: add the document-level `simulation` section version 2 did not have",
     apply: add_simulation_section,
+};
+
+/// The version 3 to version 4 step.
+///
+/// Frozen history like the two before it, and its `to` is the literal `4` for
+/// [`V1_TO_V2`]'s reason: this is now a step in the middle of a chain, and one that wrote
+/// this build's number would be wrong the moment a version 5 exists.
+///
+/// The step advances *two* version numbers, which is what makes it different in kind from
+/// the other two. `ProjectDocument.assets` embeds the manifest record collection rather
+/// than re-encoding it (ADR-0005 Decision 11), so a record's field set is a document
+/// format change *and* a record collection change: a file whose `image` members this step
+/// added but whose embedded `assets.schema_version` still said 1 would then be refused by
+/// [`check_asset_schema`] on the way in, exactly as spec 12.5's step 9 does not want.
+const V3_TO_V4: MigrationStep = MigrationStep {
+    from: 3,
+    to: 4,
+    description: "v3 to v4: give every embedded asset record the `image` colour and alpha claims \
+                  version 3 did not have, and the embedded manifest with them",
+    apply: add_image_claims,
 };
 
 /// Give every scene in a version 1 document the empty event section version 2 requires.
@@ -153,6 +177,70 @@ fn add_simulation_section(value: &mut Value) -> Result<()> {
     });
     object.insert("schema_version".to_string(), Value::from(3u32));
     Ok(())
+}
+
+/// Give every embedded asset record of a version 3 document the claims version 4 requires.
+///
+/// What the step writes is the *absence*, not a guess. A version 3 project recorded no
+/// colour space and no alpha mode anywhere, so `unclassified` is the only honest filling:
+/// reading `srgb` from the import-time default rule would be putting this build's decision
+/// into a file whose author never had the decision made, and it would be exactly the
+/// silent substitution spec 15.11 refuses — except one revision further back, where no
+/// digest disagrees with anything. `null` for the other kinds is not a filling at all; it
+/// is what `AssetManifestEntry::new` requires of a non-image record, and the two shapes are
+/// the whole of the rule the constructor enforces.
+///
+/// Idempotent the way the other two steps are: a record that already carries an `image`
+/// member keeps it, so a file someone moved toward version 4 by hand loses the claims they
+/// wrote rather than gaining the ones this step would have guessed.
+///
+/// The embedded collection's own version moves with its records, for the reason
+/// [`V3_TO_V4`]'s comment gives: after this build the reader refuses a manifest that still
+/// claims version 1, and a migration that produced an unloadable file is not a migration.
+/// It is the literal `2` and not `anim_assets::MANIFEST_SCHEMA_VERSION`, for the same
+/// reason the document's `4` is: a step frozen in the middle of the chain must keep
+/// producing the shape it produced the first time.
+fn add_image_claims(value: &mut Value) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| ProjectError::MigrationFailure {
+            from: 3,
+            to: 4,
+            detail: "a version 3 document is not a JSON object, so there is no embedded \
+                 manifest to add claims to"
+                .to_string(),
+        })?;
+    // An absent `assets` member is left alone here rather than invented, exactly as
+    // [`add_events_section`] leaves an absent `scenes`: it is not a version problem, and
+    // the typed parse reports it as the malformed document it is.
+    if let Some(Value::Object(assets)) = object.get_mut("assets") {
+        assets.insert("schema_version".to_string(), Value::from(2u32));
+        if let Some(Value::Object(records)) = assets.get_mut("records") {
+            for record in records.values_mut() {
+                let Some(members) = record.as_object_mut() else {
+                    continue;
+                };
+                let claims = claims_for_record(members);
+                members.entry("image".to_string()).or_insert(claims);
+            }
+        }
+    }
+    object.insert("schema_version".to_string(), Value::from(4u32));
+    Ok(())
+}
+
+/// The claims one version 3 record deserves: unclassified for an image, absent for
+/// everything else.
+///
+/// The kind test is against the JSON spelling `anim_assets::AssetKind` persists, so a
+/// record whose `kind` is missing or unreadable gets `null` and the typed parse that
+/// follows reports the record itself as malformed rather than this step guessing at it.
+fn claims_for_record(members: &serde_json::Map<String, Value>) -> Value {
+    if members.get("kind").and_then(Value::as_str) == Some("image") {
+        serde_json::json!({ "color_space": "unclassified", "alpha": "unclassified" })
+    } else {
+        Value::Null
+    }
 }
 
 /// Refuse a document version this build cannot interpret.
@@ -367,15 +455,16 @@ pub fn load_document_with_chain(bytes: &[u8], steps: &[MigrationStep]) -> Result
 /// A test-only chain, from a version 0 that never existed all the way to
 /// [`PROJECT_SCHEMA_VERSION`].
 ///
-/// Three steps, and the last two are the real ones: `V1_TO_V2` then `V2_TO_V3`. That is
-/// deliberate. A test that starts at the synthetic version 0 walks the synthetic rename and
-/// then both production steps, so `migrate_json`'s multi-step loop, the "chain finished but
-/// reports another version" guard, the real `events` rewrite and the real `simulation`
-/// rewrite are all on the same path a user's version 1 file will take — and with two real
-/// steps in the chain, a step that writes this build's number instead of the version it
-/// produces is now a defect the loop can actually catch rather than a theoretical one.
+/// Four steps, and the last three are the real ones: `V1_TO_V2`, `V2_TO_V3` then
+/// `V3_TO_V4`. That is deliberate. A test that starts at the synthetic version 0 walks the
+/// synthetic rename and then every production step, so `migrate_json`'s multi-step loop, the
+/// "chain finished but reports another version" guard, the real `events` rewrite, the real
+/// `simulation` rewrite and the real record-claims rewrite are all on the same path a user's
+/// version 1 file will take — and with three real steps in the chain, a step that writes this
+/// build's number instead of the version it produces is now a defect the loop can actually
+/// catch in more than one place.
 #[cfg(test)]
-pub(crate) const TEST_CHAIN: &[MigrationStep] = &[V0_TO_V1, V1_TO_V2, V2_TO_V3];
+pub(crate) const TEST_CHAIN: &[MigrationStep] = &[V0_TO_V1, V1_TO_V2, V2_TO_V3, V3_TO_V4];
 
 /// The synthetic first step. Version 0 is not a shape this project ever wrote; it exists
 /// so that a chain of length two is what the tests run.
@@ -531,9 +620,9 @@ mod tests {
     ///
     /// Spec 12.5's step 9 asks for a fixture per schema version, and a fixture generated
     /// inside the test that consumes it proves the round trip of the generator rather than
-    /// that a file a person could have on disk is readable. These two are versioned text:
-    /// version 1 is WP03's shape and version 2 is WP04's, so each step runs against the
-    /// bytes its own predecessor actually wrote.
+    /// that a file a person could have on disk is readable. These three are versioned text:
+    /// version 1 is WP03's shape, version 2 is WP04's and version 3 is WP05's, so each step
+    /// runs against the bytes its own predecessor actually wrote.
     fn committed_fixture(version: u32) -> Vec<u8> {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let path = std::path::Path::new(manifest_dir)
@@ -549,6 +638,60 @@ mod tests {
 
     fn version_two_fixture() -> Vec<u8> {
         committed_fixture(2)
+    }
+
+    fn version_three_fixture() -> Vec<u8> {
+        committed_fixture(3)
+    }
+
+    /// The same hand-written document with two embedded asset records: one image, one
+    /// not.
+    ///
+    /// `V3_TO_V4` is the first step in the chain that rewrites anything inside `assets`,
+    /// and a document with no records would let it pass having inserted nothing. The two
+    /// kinds are here because the step's whole rule is the kind test — claims for an
+    /// image, `null` for everything else — and one record of each is the smallest set
+    /// that distinguishes "applied to the right records" from "applied to all of them".
+    /// A record at `version` carries no `image` member, because that is what a record at
+    /// version 3 and below looks like.
+    fn bytes_with_records_at(version: u32) -> Vec<u8> {
+        let cel = anim_core::id::AssetId::derive(&namespace(), b"cel");
+        let sheet = anim_core::id::AssetId::derive(&namespace(), b"sheet");
+        let record = |id: anim_core::id::AssetId, kind: &str, name: &str| {
+            serde_json::json!({
+                "asset_id": id.to_canonical_string(),
+                "content_hash": "a".repeat(64),
+                "byte_length": 64u64,
+                "kind": kind,
+                "importer_version": 1u32,
+                "dependencies": [],
+                "display_name": name,
+            })
+        };
+        let scene_id =
+            anim_core::id::SceneId::derive(&namespace(), b"shot01").to_canonical_string();
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": version,
+            "project_id": document().project_id,
+            "revision": 0u64,
+            "frame_rate": { "num": 24u32, "den": 1u32 },
+            "assets": {
+                "schema_version": 1u32,
+                "records": {
+                    cel.to_canonical_string(): record(cel, "image", "cel-001"),
+                    sheet.to_canonical_string(): record(sheet, "other", "sheet-001"),
+                },
+            },
+            "scenes": { scene_id: {
+                "name": "shot01",
+                "nodes": {},
+                "tracks": {},
+                "markers": [],
+                "events": {},
+            }},
+            "simulation": crate::simulation::SimulationSettings::for_new_document(),
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -625,6 +768,147 @@ mod tests {
             "and a file that recorded no seed gets zero, which is a value the operator can \
              see and change, not one invented for them"
         );
+    }
+
+    #[test]
+    fn a_committed_version_3_file_loads_through_the_real_chain() {
+        let document = load_document(&version_three_fixture()).expect("a v3 file migrates to v4");
+        assert_eq!(document.schema_version, PROJECT_SCHEMA_VERSION);
+        // What version 3 itself added must survive, or the chain rewrites WP05 instead of
+        // adding to it.
+        let scene = document
+            .scenes
+            .values()
+            .next()
+            .expect("the fixture has one scene");
+        assert_eq!(
+            scene.events().count(),
+            2,
+            "the v2 era's events are still there"
+        );
+        assert_eq!(document.revision, anim_core::id::Revision(7));
+        assert_eq!(
+            document.simulation,
+            crate::simulation::SimulationSettings::for_new_document(),
+            "and the simulation section the file already carried is untouched"
+        );
+        assert_eq!(
+            document.assets.schema_version(),
+            anim_assets::MANIFEST_SCHEMA_VERSION,
+            "the embedded collection's version moved with it, which is what makes the \
+             migrated file loadable at all"
+        );
+    }
+
+    #[test]
+    fn the_v3_step_gives_image_records_claims_and_null_to_the_rest() {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes_with_records_at(3)).expect("the fixture parses");
+        let snapshot = value.clone();
+        migrate_json(&mut value, 3, 4, &[V3_TO_V4]).expect("the single step runs");
+
+        assert_eq!(
+            value["schema_version"],
+            serde_json::json!(4),
+            "the step writes the version it produces, not this build's number"
+        );
+        let assets = value["assets"].as_object().unwrap();
+        assert_eq!(
+            assets["schema_version"],
+            serde_json::json!(2),
+            "and the embedded collection's own version, or the loader refuses the file \
+             this step just produced"
+        );
+        let records = assets["records"].as_object().unwrap();
+        let cel = anim_core::id::AssetId::derive(&namespace(), b"cel").to_canonical_string();
+        let sheet = anim_core::id::AssetId::derive(&namespace(), b"sheet").to_canonical_string();
+        assert_eq!(
+            records[cel.as_str()]["image"],
+            serde_json::json!({ "color_space": "unclassified", "alpha": "unclassified" }),
+            "an image record gets the claim that says nothing was known, which is the only \
+             honest filling a version 3 file admits to"
+        );
+        assert_eq!(
+            records[sheet.as_str()]["image"],
+            serde_json::json!(null),
+            "and a non-image record gets absence, because the constructor refuses claims \
+             on any other kind"
+        );
+        // Totality, in the sense [`MigrationStep`] promises.
+        for key in [
+            "project_id",
+            "revision",
+            "frame_rate",
+            "scenes",
+            "simulation",
+        ] {
+            assert_eq!(snapshot[key], value[key], "{key} was rewritten");
+        }
+        for (id, record) in records {
+            let before = &snapshot["assets"]["records"][id];
+            for (member, field) in before.as_object().unwrap() {
+                assert_eq!(
+                    record[member], *field,
+                    "record {id} member {member} was rewritten by a step that only adds"
+                );
+            }
+            assert_eq!(
+                record.as_object().unwrap().len(),
+                before.as_object().unwrap().len() + 1,
+                "the claims are the only thing this step adds to a record"
+            );
+        }
+    }
+
+    #[test]
+    fn a_migrated_image_record_loads_and_reports_what_the_migration_said() {
+        // The end-to-end half: what the step writes is readable, and readable as exactly
+        // the claim it wrote. A step whose output the typed parse refuses is a step that
+        // breaks projects, and a step whose output parses to something else — `srgb`, say,
+        // filled in by a tolerant default — is the silent substitution 15.11 forbids.
+        let document = load_document(&bytes_with_records_at(3)).expect("the migrated file loads");
+        let cel = anim_core::id::AssetId::derive(&namespace(), b"cel");
+        let sheet = anim_core::id::AssetId::derive(&namespace(), b"sheet");
+        assert_eq!(
+            document.assets.get(&cel).unwrap().image,
+            Some(anim_assets::ImageAssetClaims {
+                color_space: anim_assets::ImageColorSpace::Unclassified,
+                alpha: anim_assets::ImageAlpha::Unclassified,
+            })
+        );
+        assert_eq!(document.assets.get(&sheet).unwrap().image, None);
+    }
+
+    #[test]
+    fn a_version_3_file_is_not_readable_as_version_4_without_the_step() {
+        // The strictness rule a third time, which is the point of re-proving it: `image`
+        // has no `serde(default)`, so a version 3 record cannot be loaded by a build that
+        // skipped `V3_TO_V4`, and the missing claims are never filled in at the parse
+        // boundary with the import-time default.
+        let bytes = bytes_with_records_at(3);
+        assert!(matches!(
+            load_document_with_chain(&bytes, &[]),
+            Err(ProjectError::MigrationFailure { .. })
+        ));
+        assert!(
+            serde_json::from_slice::<ProjectDocument>(&bytes).is_err(),
+            "and the refusal is in the typed parse, not only in the chain"
+        );
+        // A file whose embedded manifest is still version 1 is refused on its own terms
+        // too, which is what the step's second version write is for.
+        let cel = anim_core::id::AssetId::derive(&namespace(), b"cel").to_canonical_string();
+        let sheet = anim_core::id::AssetId::derive(&namespace(), b"sheet").to_canonical_string();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes_with_records_at(3)).unwrap();
+        value["schema_version"] = serde_json::json!(PROJECT_SCHEMA_VERSION);
+        value["assets"]["records"][cel.as_str()]["image"] =
+            serde_json::json!({ "color_space": "unclassified", "alpha": "unclassified" });
+        value["assets"]["records"][sheet.as_str()]["image"] = serde_json::json!(null);
+        let patched = serde_json::to_vec(&value).unwrap();
+        assert!(matches!(
+            load_document(&patched),
+            Err(ProjectError::UnsupportedSchema { which, .. }) if which == "asset manifest"
+        ));
     }
 
     #[test]

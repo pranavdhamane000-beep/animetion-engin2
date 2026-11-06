@@ -373,8 +373,18 @@ mod tests {
             1,
             [],
             "cel.png",
+            cel_claims(),
         )
         .unwrap()
+    }
+
+    /// An image record is not legal without its claims, and every object these tests
+    /// store is addressed as a cel, so the answer they carry is the RGBA-PNG one.
+    fn cel_claims() -> Option<crate::image::ImageAssetClaims> {
+        Some(crate::image::ImageAssetClaims {
+            color_space: crate::image::ImageColorSpace::Srgb,
+            alpha: crate::image::ImageAlpha::Straight,
+        })
     }
 
     fn store() -> (tempfile::TempDir, AssetStore) {
@@ -546,6 +556,7 @@ mod tests {
                 1,
                 [],
                 "a.png",
+                cel_claims(),
             )
             .unwrap(),
         );
@@ -558,6 +569,7 @@ mod tests {
                 1,
                 [],
                 "b.png",
+                cel_claims(),
             )
             .unwrap(),
         );

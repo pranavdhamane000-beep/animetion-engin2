@@ -28,6 +28,7 @@ use anim_core::id::AssetId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::hash::ContentHash;
+use crate::image::ImageAssetClaims;
 use crate::AssetError;
 
 /// The manifest record encoding this build writes and calls current.
@@ -35,13 +36,30 @@ use crate::AssetError;
 /// The value is part of the digest, so an unnoticed bump is a changed identity for
 /// every project that has ever been hashed. Migrations belong to WP03's document
 /// layer (spec 12.3's `migrate.rs`); this constant is what they migrate between.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 is WP06's: every record gained the `image` claims spec 15.2 makes a
+/// renderer prerequisite. The bump is not cosmetic and is not meant to be — this number
+/// is in the digest's pre-image, so *every* manifest's digest moves, including one that
+/// holds no image record at all. That is the correct outcome and the point of the
+/// number: a record that carries a colour claim is not the record that carried nothing,
+/// and a project whose identity did not move would be hashed as though the engine still
+/// meant the same thing by it. `the_schema_bump_moves_every_manifest_digest` is the
+/// assertion a later auditor goes looking for.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// The domain tag for a manifest digest (ADR-0004 consequence 5's shape).
 ///
 /// Names the *encoding*, not the document version: `v1` here means "the record
 /// framing ADR-0005 describes", and changes only if the byte layout changes, whereas
 /// [`MANIFEST_SCHEMA_VERSION`] is a field inside those bytes.
+///
+/// Schema version 2 did not move this tag, and the distinction is the reason both
+/// numbers exist. The framing — domain, `u32` version, `u64` record count, records back
+/// to back in `AssetId` byte order with every field self-delimiting — is untouched; what
+/// changed is one more field *inside* a record, appended last, so each field that was
+/// there before keeps the byte position it had. ADR-0005 Consequence 2 is the rule that
+/// keeps a domain tag with the layout and never with a field addition, and it is the same
+/// rule WP04 applied to `DOCUMENT_DOMAIN` when it added the event section.
 pub const MANIFEST_DOMAIN: &str = "anim_engine/manifest/v1";
 
 /// The asset classes spec 11.8 names.
@@ -84,7 +102,10 @@ impl std::fmt::Display for AssetKind {
 /// One asset's claim about its own bytes.
 ///
 /// `dependencies` is the only private field: it is the only one with an invariant
-/// (sorted, deduplicated, no self-edge). The rest are data as spec 11.8 lists them.
+/// (sorted, deduplicated, no self-edge). The rest are data as spec 11.8 lists them, plus
+/// `image`, which spec 11.8 does not list and spec 15.2 requires — recorded last because
+/// it is the addition, and recorded as `Option` because only an image asset can make a
+/// colour claim at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetManifestEntry {
     pub asset_id: AssetId,
@@ -94,6 +115,15 @@ pub struct AssetManifestEntry {
     pub importer_version: u32,
     dependencies: Vec<AssetId>,
     pub display_name: String,
+    /// The colour space and alpha mode recorded at import, and `None` for every other
+    /// kind.
+    ///
+    /// This is the manifest's answer, not a hint: spec 15.2's prerequisite says image
+    /// assets *carry* this metadata, and the renderer reads it here rather than
+    /// re-sniffing the object's header. Re-reads at render time would put a second
+    /// source of one fact beside this one, which gives a project two frames from one
+    /// file — the failure class DECISIONS.md #22 and ADR-0005 exist to close.
+    pub image: Option<ImageAssetClaims>,
 }
 
 impl AssetManifestEntry {
@@ -101,10 +131,12 @@ impl AssetManifestEntry {
     ///
     /// # Errors
     ///
-    /// [`AssetError::DuplicateDependency`] if `dependencies` repeats an id, and
+    /// [`AssetError::DuplicateDependency`] if `dependencies` repeats an id,
     /// [`AssetError::DependencyCycle`] if it names `asset_id` itself — the shortest
     /// cycle there is, and refusing it here means no traversal downstream has to
-    /// special-case it.
+    /// special-case it — [`AssetError::MissingImageClaims`] if `kind` is
+    /// [`AssetKind::Image`] with `image` absent, and [`AssetError::UnexpectedImageClaims`]
+    /// in the other direction.
     pub fn new(
         asset_id: AssetId,
         content_hash: ContentHash,
@@ -113,6 +145,7 @@ impl AssetManifestEntry {
         importer_version: u32,
         dependencies: impl IntoIterator<Item = AssetId>,
         display_name: impl Into<String>,
+        image: Option<ImageAssetClaims>,
     ) -> Result<Self, AssetError> {
         let mut deps: Vec<AssetId> = dependencies.into_iter().collect();
         deps.sort();
@@ -128,6 +161,22 @@ impl AssetManifestEntry {
                 path: format!("{asset_id} -> {asset_id}"),
             });
         }
+        // `image.is_some() == (kind == Image)`, checked rather than documented. Two of
+        // the three mismatch shapes are reachable and each blames a different object: a
+        // kind that promises colour data and carries none leaves the renderer with
+        // nothing to read, and claims attached to a WAV describe bytes no colour rule
+        // here ever produced.
+        if kind == AssetKind::Image && image.is_none() {
+            return Err(AssetError::MissingImageClaims {
+                asset_id: asset_id.to_canonical_string(),
+            });
+        }
+        if kind != AssetKind::Image && image.is_some() {
+            return Err(AssetError::UnexpectedImageClaims {
+                asset_id: asset_id.to_canonical_string(),
+                kind: kind.to_string(),
+            });
+        }
         Ok(Self {
             asset_id,
             content_hash,
@@ -136,6 +185,7 @@ impl AssetManifestEntry {
             importer_version,
             dependencies: deps,
             display_name: display_name.into(),
+            image,
         })
     }
 
@@ -170,12 +220,27 @@ impl AssetManifestEntry {
             cp.fixed_bytes(dependency.as_bytes());
         }
         cp.text(&self.display_name);
+        // The claims are a pure suffix, and that is a load-bearing property rather than
+        // tidiness: every field above keeps the byte position ADR-0005 Decision 2 lists,
+        // so a reader comparing a v2 record against the layout it migrated from can see
+        // the addition is the whole difference. An absent claim is one `false` with
+        // nothing after it, which is the same framing `NodeData::parent` uses for an
+        // optional id — `None` is a state, not a zero value that could also be real.
+        match &self.image {
+            None => cp.bool(false),
+            Some(claims) => {
+                cp.bool(true);
+                cp.text(claims.color_space.as_str());
+                cp.text(claims.alpha.as_str());
+            }
+        }
     }
 }
 
 impl Serialize for AssetManifestEntry {
-    /// Derived in effect: the field names are spec 11.8's, and every value written
-    /// came through [`AssetManifestEntry::new`].
+    /// Derived in effect: the field names are spec 11.8's, in that order, with the
+    /// version 2 `image` claims last, and every value written came through
+    /// [`AssetManifestEntry::new`].
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         WireEntry {
             asset_id: self.asset_id,
@@ -185,6 +250,7 @@ impl Serialize for AssetManifestEntry {
             importer_version: self.importer_version,
             dependencies: self.dependencies.clone(),
             display_name: self.display_name.clone(),
+            image: self.image,
         }
         .serialize(serializer)
     }
@@ -204,12 +270,22 @@ impl<'de> Deserialize<'de> for AssetManifestEntry {
             raw.importer_version,
             raw.dependencies,
             raw.display_name,
+            raw.image,
         )
         .map_err(serde::de::Error::custom)
     }
 }
 
-/// The persisted shape of a record: spec 11.8's field names, in that order.
+/// The persisted shape of a record: spec 11.8's field names, in that order, plus the
+/// claims last.
+///
+/// `image` deliberately has no `serde(default)`. A version 1 record simply did not have
+/// the member, so filling one in on read would let an old file load as a current one with
+/// claims nobody wrote — and the claims are the renderer's colour input, so guessing them
+/// at the parse boundary is 15.11's forbidden silent fallback with a JSON field's face.
+/// The only supported way in is [`crate::migrate`]'s version 3 to version 4 step, which
+/// writes `unclassified` explicitly: an authored absence, visible in the file, and the
+/// same strictness WP04 and WP05 applied to `events` and `simulation`.
 #[derive(Serialize, Deserialize)]
 struct WireEntry {
     asset_id: AssetId,
@@ -219,6 +295,7 @@ struct WireEntry {
     importer_version: u32,
     dependencies: Vec<AssetId>,
     display_name: String,
+    image: Option<ImageAssetClaims>,
 }
 
 /// The set of asset records a document revision refers to.
@@ -447,6 +524,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::image::{ImageAlpha, ImageColorSpace};
     use anim_core::id::AssetId;
     use uuid::Uuid;
 
@@ -459,6 +537,17 @@ mod tests {
         ContentHash::from_bytes([tag; 32])
     }
 
+    /// The claims an image record carries in these tests, as an `Option` so that a call
+    /// site reads as the kind test it is: `claims()` for an image, `None` for everything
+    /// else. Nothing here uses the migration's `Unclassified`, because a record built by
+    /// this build's own rules describes a file whose header was read.
+    fn claims() -> Option<ImageAssetClaims> {
+        Some(ImageAssetClaims {
+            color_space: ImageColorSpace::Srgb,
+            alpha: ImageAlpha::Straight,
+        })
+    }
+
     fn record(label: &str, tag: u8) -> AssetManifestEntry {
         AssetManifestEntry::new(
             id(label),
@@ -468,6 +557,7 @@ mod tests {
             1,
             [],
             format!("{label}.png"),
+            claims(),
         )
         .unwrap()
     }
@@ -504,6 +594,7 @@ mod tests {
             2,
             deps,
             "rig.anim",
+            None,
         )
         .unwrap();
         let mut sorted = deps.to_vec();
@@ -518,6 +609,7 @@ mod tests {
             2,
             [id("m"), id("z"), id("a")],
             "rig.anim",
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -539,6 +631,7 @@ mod tests {
             1,
             [id("dep"), id("dep")],
             "a.png",
+            claims(),
         )
         .unwrap_err();
         assert!(matches!(e, AssetError::DuplicateDependency { .. }), "{e}");
@@ -555,6 +648,7 @@ mod tests {
             1,
             [id("owner")],
             "a.png",
+            claims(),
         )
         .unwrap_err();
         assert!(matches!(e, AssetError::DependencyCycle { .. }), "{e}");
@@ -571,6 +665,7 @@ mod tests {
             1,
             [id("dep"), id("cel")],
             "asset.png",
+            None,
         )
         .unwrap();
         let json = serde_json::to_string(&entry).unwrap();
@@ -595,6 +690,83 @@ mod tests {
             .replace("\"rig\"", "\"Rig\"")
             .replace("\"image\"", "\"Image\"");
         assert!(serde_json::from_str::<AssetManifestEntry>(&bad_kind).is_err());
+    }
+
+    #[test]
+    fn a_version_1_record_is_refused_rather_than_read_as_version_2() {
+        // The strictness rule WP04 established for `events` and WP05 extended to
+        // `simulation`, now applied to `image`: the member has no `serde(default)`, so a
+        // record written before the bump cannot load as one written after it. The
+        // temptation this closes is specific — an absent colour claim has a plausible
+        // default (`srgb`, `opaque`), and filling one in at the parse boundary would give
+        // the renderer a colour space no author and no importer ever chose.
+        let image = AssetManifestEntry::new(
+            id("asset"),
+            hash(0x40),
+            1024,
+            AssetKind::Image,
+            1,
+            [],
+            "cel.png",
+            claims(),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(&image).unwrap();
+        value.as_object_mut().unwrap().remove("image");
+        let v1 = serde_json::to_string(&value).unwrap();
+        let e = serde_json::from_str::<AssetManifestEntry>(&v1).unwrap_err();
+        assert!(e.to_string().contains("image"), "{e}");
+
+        // The `null` a non-image record writes *is* the version 2 spelling of absence, so
+        // dropping the member is the only way to state version 1. The two half-mismatched
+        // forms are what the constructor refuses, and the persisted route has to reach
+        // them: claims on a kind that cannot carry them, and none on a kind that must.
+        let with_claims = serde_json::to_value(&image).unwrap();
+        let mut kind_switched = with_claims.clone();
+        kind_switched["kind"] = serde_json::json!("rig");
+        let e = serde_json::from_str::<AssetManifestEntry>(&kind_switched.to_string()).unwrap_err();
+        assert!(
+            e.to_string().contains("cannot carry image"),
+            "claims under a non-image kind: {e}"
+        );
+    }
+
+    #[test]
+    fn image_claims_are_present_if_and_only_if_the_kind_is_image() {
+        // The two halves of the rule are different mistakes and are reported as two
+        // categories, because the operator's remedy differs: one record is missing data
+        // that a re-import supplies, the other describes a file whose kind was written
+        // wrong.
+        let e = AssetManifestEntry::new(
+            id("asset"),
+            hash(0x40),
+            1024,
+            AssetKind::Image,
+            1,
+            [],
+            "cel.png",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(e, AssetError::MissingImageClaims { .. }), "{e}");
+        assert_eq!(e.code().as_str(), "asset.missing_image_claims");
+        assert!(e.to_string().contains(&id("asset").to_string()), "{e}");
+
+        let e = AssetManifestEntry::new(
+            id("drum"),
+            hash(0x41),
+            1024,
+            AssetKind::Audio,
+            1,
+            [],
+            "drum.wav",
+            claims(),
+        )
+        .unwrap_err();
+        assert!(matches!(e, AssetError::UnexpectedImageClaims { .. }), "{e}");
+        assert_eq!(e.code().as_str(), "asset.unexpected_image_claims");
+        assert!(e.to_string().contains(&id("drum").to_string()), "{e}");
+        assert!(e.to_string().contains("audio"), "{e}");
     }
 
     #[test]
@@ -667,6 +839,7 @@ mod tests {
                     1,
                     [],
                     "asset.png",
+                    claims(),
                 )
                 .unwrap(),
             );
@@ -683,6 +856,7 @@ mod tests {
                     1,
                     [],
                     "asset.png",
+                    claims(),
                 )
                 .unwrap(),
             );
@@ -699,6 +873,7 @@ mod tests {
                     1,
                     [],
                     "asset.png",
+                    None,
                 )
                 .unwrap(),
             );
@@ -715,6 +890,7 @@ mod tests {
                     2,
                     [],
                     "asset.png",
+                    claims(),
                 )
                 .unwrap(),
             );
@@ -731,6 +907,7 @@ mod tests {
                     1,
                     [],
                     "renamed.png",
+                    claims(),
                 )
                 .unwrap(),
             );
@@ -747,13 +924,60 @@ mod tests {
                     1,
                     [id("dep")],
                     "asset.png",
+                    None,
                 )
                 .unwrap(),
             );
             list.push(m);
 
-            // Schema version, without touching a record.
-            list.push(AssetManifest::from_records(2, [record("asset", 0x30)]).unwrap());
+            // The colour claim, which is the whole reason version 2 exists: two records of
+            // one file read differently about its pixels are two records, and the renderer
+            // has to be able to tell them apart from the digest alone.
+            let mut m = AssetManifest::new();
+            m.insert(
+                AssetManifestEntry::new(
+                    id("asset"),
+                    hash(0x30),
+                    1024,
+                    AssetKind::Image,
+                    1,
+                    [],
+                    "asset.png",
+                    Some(ImageAssetClaims {
+                        color_space: ImageColorSpace::Linear,
+                        alpha: ImageAlpha::Straight,
+                    }),
+                )
+                .unwrap(),
+            );
+            list.push(m);
+
+            // And alpha, on its own, because the two halves are encoded as two fields and
+            // one of them moving must not require the other to move.
+            let mut m = AssetManifest::new();
+            m.insert(
+                AssetManifestEntry::new(
+                    id("asset"),
+                    hash(0x30),
+                    1024,
+                    AssetKind::Image,
+                    1,
+                    [],
+                    "asset.png",
+                    Some(ImageAssetClaims {
+                        color_space: ImageColorSpace::Srgb,
+                        alpha: ImageAlpha::Opaque,
+                    }),
+                )
+                .unwrap(),
+            );
+            list.push(m);
+
+            // Schema version, without touching a record. Version 1 rather than version 2,
+            // because `MANIFEST_SCHEMA_VERSION` *is* 2 now — and the fact that this line
+            // had to move is the version bump's own proof. `an_unreadable_manifest_version_
+            // inside_a_current_document_is_refused` in `anim_project` is the load-path half.
+            list.push(AssetManifest::from_records(1, [record("asset", 0x30)]).unwrap());
             list
         };
 
@@ -783,6 +1007,7 @@ mod tests {
             3,
             [id("dep")],
             "drum.wav",
+            None,
         )
         .unwrap();
         let manifest =
@@ -806,11 +1031,102 @@ mod tests {
         let name = "drum.wav";
         expected.extend_from_slice(&(name.len() as u64).to_le_bytes());
         expected.extend_from_slice(name.as_bytes());
+        // ADR-0005 Decision 2's stream, and then version 2's one addition: a presence
+        // flag, and for a non-image record nothing after it. The bytes above are exactly
+        // what version 1 wrote, so this test is also the proof that the suffix is a
+        // suffix — an earlier field that moved position would part with `expected` here.
+        expected.push(0);
 
         assert_eq!(bytes, expected);
         assert_eq!(
             manifest_digest(&manifest).unwrap(),
             ContentHash::from_bytes(*blake3::hash(&expected).as_bytes())
+        );
+    }
+
+    #[test]
+    fn recorded_claims_follow_the_display_name_and_are_two_prefixed_texts() {
+        // The other half of the same claim, for the branch the layout test above cannot
+        // reach: a record that *does* carry claims. Rebuilt by hand, in the order ADR-0005
+        // Decision 2 fixes plus the claims last.
+        let entry = AssetManifestEntry::new(
+            id("cel"),
+            hash(0x9C),
+            40,
+            AssetKind::Image,
+            1,
+            [],
+            "cel-001.png",
+            Some(ImageAssetClaims {
+                color_space: ImageColorSpace::Linear,
+                alpha: ImageAlpha::Straight,
+            }),
+        )
+        .unwrap();
+        let mut expected = entry.asset_id.as_bytes().to_vec();
+        expected.extend_from_slice(entry.content_hash.as_bytes());
+        expected.extend_from_slice(&40u64.to_le_bytes());
+        let kind = "image";
+        expected.extend_from_slice(&(kind.len() as u64).to_le_bytes());
+        expected.extend_from_slice(kind.as_bytes());
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&0u64.to_le_bytes()); // no dependencies
+        let name = "cel-001.png";
+        expected.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        expected.extend_from_slice(name.as_bytes());
+        expected.push(1); // the claims are present
+        for text in ["linear", "straight"] {
+            expected.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            expected.extend_from_slice(text.as_bytes());
+        }
+
+        let bytes = entry.canonical_bytes().unwrap();
+        assert_eq!(bytes, expected);
+        // The spelling is the JSON spelling, so there is one string per claim rather than
+        // a table between the two forms — ADR-0005 Decision 5's rule, extended.
+        assert_eq!(
+            ImageColorSpace::Linear.as_str(),
+            "linear",
+            "the canonical and persisted colour spellings are one string"
+        );
+        assert_eq!(ImageAlpha::Straight.as_str(), "straight");
+    }
+
+    #[test]
+    fn the_schema_bump_moves_every_manifest_digest() {
+        // The assertion a later auditor wants, because it is the one that cannot be
+        // checked by reading the record: version 2 is in the digest's pre-image, so a
+        // manifest that holds not one image record — nothing but fonts — still hashes to a
+        // different value than it did under version 1. If this ever stops being true, the
+        // bump was cosmetic and the projects saved before it are indistinguishable from
+        // projects saved after, which is the state ADR-0005 Consequence 1 exists to avoid.
+        let records = [AssetManifestEntry::new(
+            id("font"),
+            hash(0x01),
+            512,
+            AssetKind::Font,
+            1,
+            [],
+            "arial.ttf",
+            None,
+        )
+        .unwrap()];
+        let before = AssetManifest::from_records(1, records.clone()).unwrap();
+        let now = AssetManifest::from_records(MANIFEST_SCHEMA_VERSION, records).unwrap();
+        assert_ne!(
+            manifest_digest(&before).unwrap(),
+            manifest_digest(&now).unwrap(),
+            "the version number is hashed, so the bump moves the digest"
+        );
+        assert_eq!(
+            MANIFEST_SCHEMA_VERSION, 2,
+            "and the number this build writes is the one the migration chain ends at"
+        );
+        // The framing did not move with it: the record gained a field, not a layout.
+        assert_eq!(MANIFEST_DOMAIN, "anim_engine/manifest/v1");
+        assert_ne!(
+            before.canonical_bytes().unwrap(),
+            now.canonical_bytes().unwrap()
         );
     }
 
@@ -862,6 +1178,7 @@ mod tests {
                     1,
                     [],
                     "pose.png",
+                    claims(),
                 )
                 .unwrap(),
             )
@@ -898,6 +1215,7 @@ mod tests {
             1,
             [id("cel"), id("rig")],
             "child.png",
+            claims(),
         )
         .unwrap();
         let mut manifest = AssetManifest::new();

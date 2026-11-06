@@ -228,7 +228,13 @@ mod tests {
         assert_eq!(first, second, "one document, one text");
         for expected in [
             "anim_engine/wp05-replay/1",
-            "schema_version 3",
+            // The number the report prints is `document.schema_version`, so this expectation
+            // moves whenever the document format does — which is the point of asserting it
+            // rather than omitting it. It moved 3 -> 4 with WP06's per-asset colour and alpha
+            // claims (DECISIONS.md #40 ruling 2), and the report line itself is unchanged:
+            // a format bump is a fact about the document, not about this text's layout. The
+            // `wp05-replay/1` tag above is the report's own version and did not move.
+            "schema_version 4",
             "ticks_per_frame 2",
             "simulation_rate 48/1",
             "seed 2a",

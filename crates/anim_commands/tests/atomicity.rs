@@ -124,8 +124,51 @@ fn record(byte: u8, dependencies: Vec<AssetId>) -> AssetManifestEntry {
         1,
         dependencies,
         format!("cel-{byte:03}"),
+        claims(),
     )
     .unwrap()
+}
+
+/// The claims a hand-built `Image` record must carry to be legal at all (spec 15.2,
+/// DECISIONS.md #40 ruling 2). Every record this file builds is an `Image`, so this is the
+/// only spelling it needs; `import` derives the same value from the stored header.
+fn claims() -> Option<anim_assets::ImageAssetClaims> {
+    Some(anim_assets::ImageAssetClaims {
+        color_space: anim_assets::ImageColorSpace::Srgb,
+        alpha: anim_assets::ImageAlpha::Straight,
+    })
+}
+
+/// Import bytes that really are a PNG, because importing an `Image` asset now means
+/// importing an image.
+///
+/// Spec 15.2's prerequisite is enforced at import (DECISIONS.md #40 ruling 2), so the
+/// importer reads the staged object's header to derive the record's colour and alpha claims,
+/// and a payload with no PNG signature is refused with `UnsupportedDecoder`. That refusal is
+/// the behaviour this suite is supposed to be standing on, which is why the fixture was made
+/// honest rather than the assertion softened — a suite that imports arbitrary bytes as a
+/// `.png` would keep passing even after the classification rule was deleted.
+///
+/// Framing is minimal on purpose: an 8x8 colour-type-6 `IHDR` and one `IDAT` carrying the
+/// seed, which is the combination the classification rules resolve to srgb/straight. The
+/// `CRC` field is zero because nothing in `image.rs` reads it.
+fn png_payload(seed: u8) -> Vec<u8> {
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8u8, 6u8, 0u8, 0u8, 0u8]);
+    let body = [seed; 16];
+    let mut chunk = Vec::with_capacity(12 + body.len());
+    chunk.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(b"IDAT");
+    chunk.extend_from_slice(&body);
+    chunk.extend_from_slice(&[0u8; 4]);
+    let mut header = Vec::with_capacity(12 + ihdr.len());
+    header.extend_from_slice(&(ihdr.len() as u32).to_be_bytes());
+    header.extend_from_slice(b"IHDR");
+    header.extend_from_slice(&ihdr);
+    header.extend_from_slice(&[0u8; 4]);
+    [b"\x89PNG\r\n\x1a\n".to_vec(), header, chunk].concat()
 }
 
 fn upsert_asset(byte: u8) -> Command {
@@ -614,7 +657,7 @@ fn a_record_committed_by_a_command_resolves_against_the_store_that_produced_it()
         "cel-001.png".to_string(),
         AssetKind::Image,
         anim_assets::CURRENT_IMPORTER_VERSION,
-        std::io::Cursor::new(b"an imported payload".to_vec()),
+        std::io::Cursor::new(png_payload(0x01)),
     )
     .unwrap();
 
@@ -657,12 +700,18 @@ fn a_record_committed_by_a_command_resolves_against_the_store_that_produced_it()
         "cel-001.png".to_string(),
         AssetKind::Image,
         anim_assets::CURRENT_IMPORTER_VERSION,
-        std::io::Cursor::new(b"a corrected payload".to_vec()),
+        std::io::Cursor::new(png_payload(0x02)),
     )
     .unwrap();
     assert_ne!(
         replacement.content_hash, imported.content_hash,
         "different bytes are a different asset revision under the same id"
+    );
+    // Both are still classifiable as images, so the displacement is the only difference: a
+    // reimport that lost the claims would fail the record's own constructor instead.
+    assert_eq!(
+        replacement.image, imported.image,
+        "the same PNG framing classifies the same way"
     );
     let revision = processor.document().revision.0;
     processor

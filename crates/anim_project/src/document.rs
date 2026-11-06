@@ -2,7 +2,11 @@
 //!
 //! `ProjectDocument` is spec 12.8's struct with its six fields, plus the two sections later
 //! packages needed and 12.8 does not list — `events` per scene from version 2 and the
-//! `simulation` section from version 3. The two things it deliberately does not hold are the
+//! `simulation` section from version 3. Version 4 adds no field here at all: it is the
+//! version of the records already inside `assets`, which this document embeds, and an
+//! embedded collection that changed shape makes the file that holds it a new file format
+//! whether or not one more member appeared at the top level. The two things it deliberately
+//! does not hold are the
 //! ones spec 12.8 names as forbidden —
 //! "no editor, renderer, device or undo-stack references" — and the third is a `dirty`
 //! flag: a document that recorded whether it had been saved would need a second writer
@@ -38,11 +42,16 @@ use crate::{ProjectError, Result, Revision};
 /// Version 2 is WP04's, and its one change is the `events` section every scene gained so
 /// that spec 13.5 step 1 has something to validate and 13.7 has authored fields to order.
 /// Version 3 is WP05's: the `simulation` section spec 14.2 names as a prerequisite and 12.8
-/// never listed, carrying the tick rate and the random-stream seed. Both steps are real —
-/// `migrate::V1_TO_V2` and `migrate::V2_TO_V3` — with a committed fixture per version, which
-/// is what the rule above asks for. `DOCUMENT_DOMAIN` stays at `v1`: appending a section to
-/// an unchanged framing is a field addition, not a byte-layout change.
-pub const PROJECT_SCHEMA_VERSION: u32 = 3;
+/// never listed, carrying the tick rate and the random-stream seed. Version 4 is WP06's, and
+/// it moves because `assets` embeds the record collection (ADR-0005 Decision 11): the records
+/// inside it gained the image colour and alpha claims spec 15.2 names as a prerequisite, and a
+/// document that contains a changed record format has itself changed. All three steps are
+/// real — `migrate::V1_TO_V2`, `migrate::V2_TO_V3` and `migrate::V3_TO_V4` — with a committed
+/// fixture per version, which is what the rule above asks for. `DOCUMENT_DOMAIN` stays at
+/// `v1`, and so does `MANIFEST_DOMAIN`: appending a field to an unchanged framing is a data
+/// event, not a byte-layout change, which is the split ADR-0005 Decision 4 draws and both
+/// version 2 and version 3 already established.
+pub const PROJECT_SCHEMA_VERSION: u32 = 4;
 
 /// The authoritative state of one project at one revision.
 ///
@@ -242,6 +251,16 @@ mod tests {
         Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap()
     }
 
+    /// The claims a hand-built `Image` record must carry to be legal at all (spec 15.2,
+    /// DECISIONS.md #40 ruling 2). `import` derives them from the stored header; a record
+    /// assembled here has to state them, and `None` is only valid for a non-image kind.
+    fn claims() -> Option<anim_assets::ImageAssetClaims> {
+        Some(anim_assets::ImageAssetClaims {
+            color_space: anim_assets::ImageColorSpace::Srgb,
+            alpha: anim_assets::ImageAlpha::Straight,
+        })
+    }
+
     fn rate() -> FrameRate {
         FrameRate::new(24000, 1001).unwrap()
     }
@@ -355,6 +374,7 @@ mod tests {
             1,
             [missing],
             "holder",
+            claims(),
         )
         .unwrap();
         document.assets.insert(record);
