@@ -187,8 +187,6 @@ mod tests {
     fn empty_input(tick: SimTick) -> SimulationInputFrame {
         SimulationInputFrame {
             tick,
-            position: anim_core::time::FramePos::at_frame(0),
-            time: Rational::from_i128(0),
             anchors: std::sync::Arc::new([]),
             scheduled: std::sync::Arc::new([]),
             project_seed: [0u8; anim_project::PROJECT_SEED_BYTES],

@@ -786,6 +786,88 @@ fn one_streams_version_move_does_not_touch_another() {
 }
 
 #[test]
+fn a_global_lever_moves_every_stream_where_a_per_stream_lever_moves_exactly_one() {
+    // The two version knobs are different instruments and this is what proves it, because a
+    // test that only ever bumps one of them cannot tell "per-stream" from "global" at all.
+    //
+    // The global lever observable at runtime is the project seed: it is one of the five
+    // StreamKey terms and it lives in `ProjectDocument.simulation`, so turning it is exactly
+    // what an operator does when they want a different-but-reproducible draw of every emitter.
+    // `PHILOX_ALGORITHM_VERSION` itself is a compile-time constant and cannot be turned here;
+    // the value that carries it at runtime is `AlgorithmVersions::philox`, which
+    // `restore_checkpoint` refuses outright -- that half is
+    // `crate::checkpoint::tests::foreign_algorithm_versions_are_a_mismatch_not_a_reinterpretation`.
+    let entities = ["hero", "sword", "cape"];
+    let channels = [
+        purpose::PARTICLE_DIRECTION,
+        purpose::PARTICLE_LIFETIME,
+        purpose::PARTICLE_SPEED,
+        purpose::PARTICLE_SIZE,
+        purpose::PARTICLE_ROTATION,
+        purpose::PARTICLE_SUBFRAME,
+    ];
+    let probes = [(5i64, 2u32, 1u8), (900, 0, 3), (40_000, 11, 0)];
+    let address = |seed_byte: u8, entity: &str, channel: u16, version: u32| StreamKey {
+        project_seed: [seed_byte; anim_project::PROJECT_SEED_BYTES],
+        system_id: system::PARTICLES,
+        entity_id: node(entity),
+        purpose: channel,
+        stream_version: version,
+    };
+    let draw = |key: &StreamKey| -> Vec<u32> {
+        probes
+            .iter()
+            .map(|(tick, at, lane)| random_u32(key, SimTick(*tick), *at, *lane).unwrap())
+            .collect()
+    };
+    let table: Vec<(&str, u16)> = entities
+        .iter()
+        .flat_map(|entity| channels.iter().map(move |channel| (*entity, *channel)))
+        .collect();
+
+    let seed_a: Vec<Vec<u32>> = table
+        .iter()
+        .map(|(entity, channel)| draw(&address(0x11, entity, *channel, 1)))
+        .collect();
+    let seed_b: Vec<Vec<u32>> = table
+        .iter()
+        .map(|(entity, channel)| draw(&address(0x22, entity, *channel, 1)))
+        .collect();
+    let moved_by_seed: usize = seed_a
+        .iter()
+        .zip(seed_b.iter())
+        .filter(|(x, y)| x != y)
+        .count();
+    assert_eq!(
+        moved_by_seed,
+        table.len(),
+        "one seed byte changed {moved_by_seed} of {} streams; a global lever that misses any \
+         stream would leave part of the project replaying the old draw",
+        table.len()
+    );
+
+    // Now the per-stream lever, against the same baseline: exactly one entry moves.
+    let bumped: Vec<Vec<u32>> = table
+        .iter()
+        .map(|(entity, channel)| {
+            let version = u32::from(*entity == "sword" && *channel == purpose::PARTICLE_SIZE);
+            draw(&address(0x11, entity, *channel, 1 + version))
+        })
+        .collect();
+    let mut moved_by_version: Vec<(&str, u16)> = Vec::new();
+    for (index, entry) in table.iter().enumerate() {
+        if seed_a[index] != bumped[index] {
+            moved_by_version.push(*entry);
+        }
+    }
+    assert_eq!(
+        moved_by_version,
+        vec![("sword", purpose::PARTICLE_SIZE)],
+        "bumping one stream version moved {moved_by_version:?}, not one stream"
+    );
+}
+
+#[test]
 fn distinct_purposes_and_entities_are_distinct_addresses() {
     let seed = [7u8; anim_project::PROJECT_SEED_BYTES];
     let mut seen: std::collections::BTreeMap<[u64; 2], String> = std::collections::BTreeMap::new();

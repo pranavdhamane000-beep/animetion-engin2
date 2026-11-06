@@ -5,19 +5,23 @@
 //! comparators that can disagree about what "the same" means.
 //!
 //! 1. **Read a headless report** ([`Report::parse`]), so a test that spawns a process is
-//!    comparing structured values rather than diffing text it hopes has a fixed shape.
-//! 2. **Compare two runs that cached differently** ([`assert_same_state_hashes`]), with the
-//!    failure message naming the tick and both hashes, which is the difference between a gate
-//!    that reports a defect and one that reports a red line.
+//!    comparing structured values rather than diffing text it hopes has a fixed shape, and so a
+//!    run can say how many checkpoint entries it ended with (`checkpoints_stored`).
+//! 2. **Compare two runs that cached differently** ([`assert_same_run`]), with the failure
+//!    message naming the tick and both hashes, which is the difference between a gate that
+//!    reports a defect and one that reports a red line. The identity fields are checked first,
+//!    so a drifted fixture is reported as that rather than as nondeterminism.
 //!
 //! ## The assertion that makes the rest of it worth running
 //!
 //! A cadence comparison between two runs that cached identically proves nothing, and a
 //! configuration list that happens to collapse to the same cache size is exactly how that
-//! happens by accident. [`assert_caching_differed`] is therefore called alongside every
-//! comparison rather than being assumed, on the same reasoning DECISIONS.md #31.13 applied to
-//! the kill-point suite: an assertion about the *residue* of a scenario is what proves the
-//! scenario was the scenario.
+//! happens by accident. [`assert_caching_differed`] is therefore called by the cadence
+//! comparison in `tests/wp05_isolation.rs`, on the reasoning DECISIONS.md #31.13 applied to the
+//! kill-point suite: an assertion about the *residue* of a scenario is what proves the scenario
+//! was the scenario. The child reports its own residue as `checkpoints_stored`, so the claim
+//! travels across the process boundary instead of being asserted about an in-process cache the
+//! comparison never looked at.
 
 #![allow(
     clippy::unwrap_used,
@@ -28,14 +32,6 @@
               every production crate, and this is not one -- the same exemption \
               `wp04_fixture.rs` carries."
 )]
-
-use anim_core::id::SceneId;
-use anim_project::ProjectDocument;
-use anim_sim::checkpoint::{state_hash, CheckpointCache};
-use anim_sim::context::SimulationContext;
-use anim_sim::mode::SimulationMode;
-use anim_sim::replay::sequential_hashes;
-use anim_sim::SimTick;
 
 /// One parsed headless report.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +46,9 @@ pub struct Report {
     pub count: u64,
     /// The final tick's hash.
     pub final_hash: String,
+    /// How many checkpoint entries the run actually held at the end. A result of the policy,
+    /// not of the project, which is why it is not part of [`Report::identity`].
+    pub checkpoints_stored: usize,
 }
 
 impl Report {
@@ -69,6 +68,7 @@ impl Report {
         let mut aggregate = None;
         let mut count = None;
         let mut final_hash = None;
+        let mut checkpoints_stored = None;
         for line in text.lines() {
             if line == anim_headless::replay::REPORT_TAG {
                 continue;
@@ -118,6 +118,16 @@ impl Report {
                     )
                 }
                 "final_hash" => final_hash = Some(value.to_string()),
+                "checkpoints_stored" => {
+                    checkpoints_stored =
+                        Some(
+                            value
+                                .parse()
+                                .map_err(|_| DeterminismError::UnrecognisedLine {
+                                    line: line.to_string(),
+                                })?,
+                        );
+                }
                 other => header.push((other.to_string(), value.to_string())),
             }
         }
@@ -128,6 +138,9 @@ impl Report {
             count: count.ok_or(DeterminismError::MissingField { field: "count" })?,
             final_hash: final_hash.ok_or(DeterminismError::MissingField {
                 field: "final_hash",
+            })?,
+            checkpoints_stored: checkpoints_stored.ok_or(DeterminismError::MissingField {
+                field: "checkpoints_stored",
             })?,
         })
     }
@@ -240,63 +253,6 @@ pub fn assert_same_run(a: &Report, b: &Report, context: &str) -> Result<(), Dete
     Ok(())
 }
 
-/// The hash sequence one configuration produced, in process.
-///
-/// # Panics
-///
-/// If the context cannot be built or a step fails. A helper used only by tests, where a
-/// failure at this point is the fixture being wrong rather than the run being invalid, and
-/// `clippy::unwrap_used` is denied for production paths rather than for assertions.
-#[must_use]
-pub fn in_process_hashes(
-    document: &ProjectDocument,
-    scene_id: SceneId,
-    last_tick: i64,
-    cadence_ticks: u64,
-    capacity: usize,
-    mode: SimulationMode,
-) -> Vec<String> {
-    let hashes = if cadence_ticks == 0 || capacity == 0 {
-        let mut context =
-            SimulationContext::new(document, scene_id, CheckpointCache::default()).unwrap();
-        sequential_hashes(&mut context, SimTick(last_tick), mode)
-            .unwrap()
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-    } else {
-        // The cache-filled route: run forward with the policy on, then seek to every tick and
-        // record what each arrival hashed to.
-        let mut context = SimulationContext::new(
-            document,
-            scene_id,
-            CheckpointCache::new(cadence_ticks, capacity),
-        )
-        .unwrap();
-        let mut state = context.initial_state().unwrap();
-        context
-            .advance(&mut state, SimTick(last_tick), SimulationMode::Export, None)
-            .unwrap();
-        let mut out = Vec::new();
-        for tick in 0..last_tick + 1 {
-            let arrived = anim_sim::seek::seek(&mut context, SimTick(tick)).unwrap();
-            out.push(state_hash(&arrived).unwrap().to_string());
-        }
-        out
-    };
-    // The length is asserted rather than padded. A helper that resized a short run up to the
-    // requested length with empty strings would make every comparison below pass on the
-    // missing tail, which is the silent-pass shape this module exists to avoid.
-    assert_eq!(
-        hashes.len(),
-        usize::try_from(last_tick + 1).unwrap(),
-        "ticks 0..={last_tick} is {} states and the helper returned {:?}",
-        last_tick + 1,
-        hashes.len()
-    );
-    hashes
-}
-
 /// Assert that two configurations cached differently, which is the precondition that makes a
 /// comparison between them a test rather than a tautology.
 ///
@@ -333,6 +289,11 @@ mod tests {
 
     use super::*;
 
+    /// A synthetic report, shaped exactly as `anim_headless::replay::report` writes one.
+    ///
+    /// `checkpoints_stored` is here because the real writer emits it: the parser requires the
+    /// field, and a fixture that drifted from the format would test the parser against a
+    /// document no process ever produces.
     fn sample_report(ticks: usize, aggregate: &str) -> String {
         let mut lines = vec![
             anim_headless::replay::REPORT_TAG.to_string(),
@@ -351,6 +312,7 @@ mod tests {
         for index in 0..ticks {
             lines.push(format!("tick {index} hash h{index}"));
         }
+        lines.push(format!("checkpoints_stored {}", ticks / 2));
         lines.push(format!("count {ticks}"));
         lines.push("final_hash hlast".to_string());
         lines.push(format!("aggregate {aggregate}"));
@@ -366,7 +328,15 @@ mod tests {
         assert_eq!(report.count, 4);
         assert_eq!(report.final_hash, "hlast");
         assert_eq!(report.field("ticks_per_frame"), Some("4"));
-        assert_eq!(report.identity().len(), 9);
+        assert_eq!(
+            report.checkpoints_stored, 2,
+            "sample_report stores half its tick count"
+        );
+        assert_eq!(
+            report.identity().len(),
+            9,
+            "checkpoints_stored is a result of the run, not an identity of the project, so              two configurations may differ in it and still be comparable"
+        );
         // The header must not have swallowed a tick line or a field it did not need.
         assert!(
             !report.header.iter().any(|(key, _)| key == "tick"),

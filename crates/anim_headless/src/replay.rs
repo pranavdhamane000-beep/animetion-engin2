@@ -121,6 +121,10 @@ pub fn report(
         hashes.push(state_hash(&state)?);
     }
 
+    // `checkpoints_stored` is a *result* of the run, not an identity of the project: it is
+    // written after the loop so a comparison across processes can see that two different
+    // policies really did cache differently. It is deliberately not an identity field, because
+    // two configurations that agree on hashes must still be allowed to disagree here.
     let mut lines = vec![
         REPORT_TAG.to_string(),
         format!("schema_version {}", document.schema_version),
@@ -153,6 +157,10 @@ pub fn report(
         .last()
         .map(ToString::to_string)
         .unwrap_or_else(|| "none".to_string());
+    lines.push(format!(
+        "checkpoints_stored {}",
+        context.checkpoints().len()
+    ));
     lines.push(format!("count {}", hashes.len()));
     lines.push(format!("final_hash {final_hash}"));
     lines.push(format!("aggregate {}", digest.hex_digest()));

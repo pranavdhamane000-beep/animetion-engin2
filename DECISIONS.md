@@ -1623,3 +1623,69 @@ reproduces 0 of 55, an eleven-round variant 0, swapped multipliers 0, the wrong 
   rather than resolved by guessing.
 - Property paths still come from WP04's registry in `animation.rs`; the simulation reads none of
   them, and a WP10 picker should offer those names rather than free text (item 21).
+
+### #37 — WP05 follow-up — a dead-surface sweep, and two claims that survived a green gate
+
+Asked after the commit whether anything remained, I swept the new code for public items with no
+caller rather than answering from memory. Four findings, three of them real. `git log` reference:
+this entry and its commit sit directly on top of `1c07bb9`.
+
+1. **`assert_caching_differed` was dead in practice and its module header claimed otherwise.**
+   The helper was `pub`, had its own unit test, and the isolation test never called it — while
+   `crates/anim_test_support/src/determinism.rs`'s header said the assertion "is therefore
+   called alongside every comparison rather than being assumed." Fixed by making the claim true
+   rather than by deleting the sentence: `anim_headless::replay::report` now writes a
+   `checkpoints_stored` line, and
+   `a_checkpointed_process_matches_an_uncheckpointed_one` reads it out of each child's report and
+   calls the helper. **Why the report line and not an in-process count:** the whole point of the
+   precondition is that the two *processes* cached differently, and a number computed in the
+   parent describes a cache the comparison never looked at. It is deliberately **not** an
+   identity field — two configurations that agree on every hash must still be allowed to disagree
+   here, which is the property being asserted.
+2. **`in_process_hashes` had zero callers anywhere.** Written for a parent-versus-child check
+   that I then implemented directly with `sequential_hashes`. Deleted.
+3. **`SimulationInputFrame.position` and `.time` were never read.** Both are pure functions of
+   `(clock, tick)` through `position_of_tick`/`time_of_tick`, so carrying them was a second place
+   for one instant to be wrong — the same objection that kept `frame_rate` out of
+   `ProjectDocument.simulation` (#35 ruling 3) and that `event.rs` raises about a cue's asset.
+   Removed, and the two assertions that had read them now ask the clock. 14.8 leaves the type
+   undefined, so narrowing it is still this project's call.
+4. **`particle_stream_key` and `stream_subkeys` had already gone** when `particles.rs` was
+   rewritten mid-package, so there was no other uncalled public surface from WP05. Worth
+   recording as the null result: the repo made a whole follow-up commit for this in WP03
+   (`bf33469`), and a repeat was the thing being checked for.
+
+**Then the sweep turned up two more, both of the same kind, and neither reachable by a test.**
+
+- `determinism.rs`'s module header linked **`assert_same_state_hashes`, a function that has never
+  existed** — it was renamed to `assert_same_run` while the package was in flight and the link was
+  left behind. Intra-doc links are only checked by `cargo doc`, which the gate does not run.
+- `determinism.rs`'s own `sample_report` fixture had **drifted from the real writer**: once
+  `report()` emitted a new line, five of the module's tests failed immediately, which is the good
+  outcome. The bad outcome is that the fixture was already not what the writer produced before
+  this change, and nothing noticed until a second field forced the comparison. Both are now
+  documented at the fixture.
+
+**The generalisable part, and the reason this is an entry rather than a silent amend.** A green
+gate proves the compiled assertions hold. It says nothing about a doc comment's truth, about a
+`///` link's target, or about a public function nobody calls — and a header sentence describing a
+precondition as enforced is exactly as misleading to the next session as an unreachable error
+variant is (risk 19), possibly more so, because it reads like the test suite covers it.
+`stream_version`'s gate (#36.1) was caught by a test; these three were not catchable by one, which
+is why the sweep is now part of how a package closes here.
+
+**Also added, per the operator's choice:**
+`a_global_lever_moves_every_stream_where_a_per_stream_lever_moves_exactly_one`. The previous
+contrast was weak in isolation — recomputing a pure function and comparing it to itself. This
+turns the two knobs against each other where both are observable: the global lever is the project
+seed (one of the five `StreamKey` terms, and the only global one reachable at runtime —
+`PHILOX_ALGORITHM_VERSION` is a compile-time constant, and its runtime carrier
+`AlgorithmVersions::philox` is refused at `restore_checkpoint`, which that test already covers).
+Result: one seed byte moves **all 18** (entity × channel) streams; one `stream_version` bump moves
+**exactly one**, named. The two instruments are now demonstrably different, which is what G4's
+last clause is actually leaning on.
+
+Workspace test count 584 → **585**. `tools\ci.cmd` green again: fmt, clippy `-D warnings`,
+`test --workspace --locked`. No behaviour of a committed package changed: nothing that a caller
+could observe through `step_once`, `seek`, `prepare_export` or a state digest is different, and
+the 10,000-frame two-process comparison still passes line by line.

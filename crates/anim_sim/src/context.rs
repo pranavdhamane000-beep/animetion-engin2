@@ -29,7 +29,6 @@
 use std::sync::Arc;
 
 use anim_core::id::SceneId;
-use anim_core::rational::Rational;
 use anim_core::time::{FramePos, FrameRate};
 use anim_project::ProjectDocument;
 use anim_scene::{SimulationInput, SnapshotCache};
@@ -54,10 +53,6 @@ use crate::{Result, SimError, SimTick};
 pub struct SimulationInputFrame {
     /// The tick these inputs are for, which must equal the state's.
     pub tick: SimTick,
-    /// The timeline position of that tick.
-    pub position: FramePos,
-    /// Its exact time, from the clock rather than accumulated.
-    pub time: Rational,
     /// This tick's evaluated per-node inputs, in 13.7's visit order.
     pub anchors: Arc<[SimulationInput]>,
     /// The events scheduled at this tick, in 13.7's canonical order.
@@ -207,12 +202,8 @@ impl<'a> SimulationContext<'a> {
     /// The snapshot and clock errors above.
     pub fn input_at(&mut self, tick: SimTick) -> Result<SimulationInputFrame> {
         let snapshot = self.cached_snapshot(tick)?;
-        let position = self.clock().position_of_tick(tick)?;
-        let time = self.clock().time_of_tick(tick)?;
         Ok(SimulationInputFrame {
             tick,
-            position,
-            time,
             anchors: Arc::clone(&snapshot.simulation_inputs),
             scheduled: Arc::from(self.schedule.at(tick).to_vec()),
             project_seed: self.settings.project_seed,
@@ -326,6 +317,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::CheckpointCache;
     use anim_core::id::{EventDefinitionId, NodeId, ProjectId};
+    use anim_core::rational::Rational;
     use anim_project::{EventDefinition, EventKind, NodeData, SimulationSettings};
 
     fn namespace() -> uuid::Uuid {
@@ -426,14 +418,17 @@ mod tests {
     }
 
     #[test]
-    fn the_input_for_a_tick_names_the_tick_and_its_frame() {
+    fn the_input_for_a_tick_carries_the_tick_its_anchors_and_the_seed() {
         let document = document();
         let mut context =
             SimulationContext::new(&document, scene_id(), CheckpointCache::default()).unwrap();
         let input = context.input_at(SimTick(0)).unwrap();
         assert_eq!(input.tick, SimTick(0));
+        // The tick's timeline position is asked of the clock, not carried on the frame:
+        // `position_of_tick` is a pure function of `(clock, tick)`, so a stored copy would be
+        // a second place for one instant to be wrong.
         assert_eq!(
-            input.position,
+            context.clock().position_of_tick(input.tick).unwrap(),
             FramePos::at_frame(0),
             "tick 0 of four is in frame 0"
         );
@@ -607,7 +602,10 @@ mod tests {
             first.anchors, third.anchors,
             "frame 0 evaluated twice is one answer, whatever the cache did in between"
         );
-        assert_ne!(first.position, second.position);
+        assert_ne!(
+            first.tick, second.tick,
+            "two different ticks are two different frames of input"
+        );
         let report = context.cache_report();
         assert_eq!(report.evaluations, 2, "two distinct frames");
         assert_eq!(report.hits, 1, "and the third came from the cache");

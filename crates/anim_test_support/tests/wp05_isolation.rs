@@ -36,7 +36,7 @@ use anim_sim::context::SimulationContext;
 use anim_sim::mode::SimulationMode;
 use anim_sim::replay::sequential_hashes;
 use anim_sim::{state_hash, SimTick};
-use anim_test_support::determinism::Report;
+use anim_test_support::determinism::{assert_caching_differed, Report};
 use anim_test_support::wp05_fixture;
 
 /// The child binary, built by the same invocation of cargo as this test.
@@ -164,6 +164,11 @@ fn a_checkpointed_process_matches_an_uncheckpointed_one() {
             Report::parse(&text).unwrap(),
         ));
     }
+    assert_eq!(
+        plain.checkpoints_stored, 0,
+        "the reference configuration holds no checkpoints at all, which is 14.12's \
+         'disabled checkpoints' row rather than an accident of this fixture"
+    );
     for (label, report) in &cached {
         assert_same_run(&plain, report, label);
         assert_eq!(
@@ -172,17 +177,40 @@ fn a_checkpointed_process_matches_an_uncheckpointed_one() {
             "and the child really did run with the policy the label names, rather than \
              ignoring the argument"
         );
+        assert!(
+            report.checkpoints_stored > 0,
+            "{label} stored nothing, so the policy was not exercised in that child"
+        );
     }
-    // The configurations cached different numbers of entries, which is what makes the
-    // equality above a test rather than one run described four ways.
-    let counts: Vec<usize> = cached.iter().map(|(_, r)| r.ticks.len()).collect();
+    // The precondition that makes the equality above a test rather than one run described
+    // four ways: the children ended with different numbers of cached entries. Read out of
+    // the reports themselves, so it survives the process boundary.
+    let counts: Vec<usize> = cached.iter().map(|(_, r)| r.checkpoints_stored).collect();
+    let distinct: std::collections::BTreeSet<usize> = counts.iter().copied().collect();
     assert!(
-        counts.windows(2).all(|pair| pair[0] == pair[1]),
-        "every configuration reported the same number of ticks: {counts:?}"
+        distinct.len() > 1,
+        "all four configurations cached identically ({counts:?}), so this compares one \
+         configuration against itself four times"
     );
-    for (label, _) in &cached {
-        let _ = label;
-    }
+    assert!(
+        assert_caching_differed(
+            "uncheckpointed",
+            plain.checkpoints_stored,
+            "cadence 1 capacity 4",
+            cached[0].1.checkpoints_stored,
+        )
+        .is_ok(),
+        "cadence 1 capacity 4 held {} entries and the reference held none",
+        cached[0].1.checkpoints_stored
+    );
+    // And the helper refuses a pair that did not differ, which is the only thing that keeps
+    // the assertion above from being decorative.
+    assert!(assert_caching_differed("a", 4, "b", 4).is_err());
+    let ticks: Vec<usize> = cached.iter().map(|(_, r)| r.ticks.len()).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] == pair[1]),
+        "every configuration reported the same number of ticks: {ticks:?}"
+    );
 }
 
 #[test]
