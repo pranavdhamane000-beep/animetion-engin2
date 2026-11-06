@@ -1689,3 +1689,309 @@ Workspace test count 584 → **585**. `tools\ci.cmd` green again: fmt, clippy `-
 `test --workspace --locked`. No behaviour of a committed package changed: nothing that a caller
 could observe through `step_once`, `seek`, `prepare_export` or a state digest is different, and
 the 10,000-frame two-process comparison still passes line by line.
+
+### #38 — environment — dGPU-only mode: what it fixed, what it did not, and one correction to #18
+
+The operator switched this machine to discrete-only graphics — **Armoury Crate → GPU Modes →
+Ultimate** on the FX607VBR — on 2026-11-06. That is exactly the free input #18's residual asked
+someone to check. Measured the
+same day with `wp00_adapter` and `wp00_gpu` (both PASS, exit 0) plus `Win32_VideoController`,
+`Get-PnpDevice -Class Display` and `vulkaninfo --summary`. Fresh output is in `probe-out/`
+(git-ignored, regenerated); **no committed G0 evidence was rewritten.**
+
+**What it fixed.**
+- NVIDIA now correlates at **DXGI adapter #0**; the committed hybrid evidence says **#1**.
+- Both probes resolve on **attempt 1**. Hazard 2 (`CM_PROB_PHANTOM`, power-gating) did not
+  appear in either run.
+- Consequence: BUILD_STATE's WP00 row claim "ordinal 0 is the iGPU here" is **mode-dependent,
+  not a board fact**. It is now false in this configuration, which is the proof that it must
+  never be a selection key in either configuration.
+
+**What it did not fix — the correction to #18's residual.** `Win32_VideoController` and
+`Get-PnpDevice` still list `Intel(R) Graphics` (`PCI\VEN_8086&DEV_A7AB…`, driver 32.0.101.6314,
+Status **OK**), and `vulkaninfo --summary` still enumerates it as
+`PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU` (api 1.3.297, driver 101.6314). Measured alongside: NVIDIA
+now owns the desktop at 1920x1200 @144 Hz — the recorded mode, unchanged — while Intel reports **no
+active resolution**. The iGPU has no output and is still a fully selectable Vulkan/DXGI device.
+dGPU-only moves the panel and reorders enumeration; it does **not** remove the adapter from
+Vulkan or DXGI. So the
+wrong-GPU class survives the setting, #18 decisions 1–3 stand unchanged (PCI bus id + adapter
+name + driver revalidation, the 3892 MiB `DedicatedVideoMemory` floor — re-measured, identical —
+and the WP10 startup assertion), and decision 5's silent-degradation path is still live. **Read
+that residual as answered negatively.**
+
+**One asymmetry that would have mis-led WP06.** `device_pci_bus_id` is `None` on
+`wp00_adapter`'s `AdapterIdentity` (from `wgpu::AdapterInfo`) and `Some("0000:01:00.0")` on
+`wp00_gpu`'s (from ash via `VK_EXT_pci_bus_info`). The `None` is **pre-existing** — byte-identical
+in the committed hybrid evidence — so it is a provenance difference, not a mode effect. #18's
+"require non-empty and hard-fail" is correct but implementable only on the ash path: a WP06 that
+reads `wgpu::AdapterInfo::device_pci_bus_id` and hard-fails on empty hard-fails on this machine
+in *both* modes. **The PCI key must come from `VK_EXT_pci_bus_info`, not from `AdapterInfo`.**
+
+> **CORRECTED 2026-11-06 by #40 — the two provenances above are swapped.** Measured from the code
+> and re-confirmed by running both probes in Standard the same day: `Some("0000:01:00.0")` on
+> `wp00_gpu` comes from **`wgpu::AdapterInfo::device_pci_bus_id`** (`wp00_gpu.rs:207`, populated by
+> wgpu-hal from `VK_EXT_pci_bus_info`), and the `None` on `wp00_adapter` is a **hard-coded `None`**
+> at `wp00_adapter.rs:342`, whose own comment says that probe never queries the extension through
+> ash. `ash` appears nowhere in `wp00_gpu.rs`. The asymmetry is real, is a provenance difference and
+> is not a mode effect — those claims stand, as does #18's "require non-empty and hard-fail". What
+> does not stand is the conclusion: the hard-fail is implementable on the **`AdapterInfo`** path,
+> which returns a value here in both GPU modes, so production takes no `ash` dependency and opens
+> no second `VkInstance`. **The PCI key comes from `wgpu::AdapterInfo`.**
+
+**Unchased, stated rather than hidden.** `vulkaninfo --summary` exited 1 while still printing both
+devices. The device list is the evidence; the nonzero code was not investigated and is claimed as
+neither a pass nor a failure of the mode. If a later package needs per-adapter presentation
+support, that question makes this exit code live.
+
+**Ruling on where WP06 runs** *(SUPERSEDED BY #39 THE SAME DAY — read #39; the measurement
+paragraphs above still stand.)* (operator offered no preference, then confirmed Ultimate is the
+mode he has on; taking the recommended branch):
+develop and cut WP06's goldens in **Ultimate** — stable, no power-gating, and the same silicon,
+device id and driver as G0, so spec 9.12 carries. **Owed, one run:** switch back to **Standard**
+(hybrid) once and record what the adapter probes select and whether the retry path engages,
+because Standard is
+the only configuration in which the iGPU-fallback class can be *observed* rather than reasoned
+about. That run is what separates #18 as a written constraint from #18 as a tested one, and it
+belongs to WP06/WP07, not to G0. If the model also exposes **Eco**, that mode is the cheapest
+honest test of the refusal path — no discrete adapter at all, so the engine must fail rather than
+render — but it has never been measured here and is not assumed to exist.
+
+No engine code changed. G0 stays valid: adapter, driver and pinned FFmpeg are the same hardware —
+the mode changes enumeration order, not silicon.
+
+### #39 — environment — the operator's standing GPU mode is **Standard**, and what that re-decides
+
+Same day as #38. After its consequences were laid out he chose **Standard** (hybrid Optimus) over
+**Ultimate**. This entry replaces #38's "Ruling on where WP06 runs" paragraph and nothing else in
+#38 — its measurements stand and are the reason this choice is defensible.
+
+**Why Standard is arguably the better call for WP06 specifically.**
+- **The falsifying case becomes the everyday case.** In Standard the iGPU holds DXGI ordinal
+  **#0** and NVIDIA is **#1**; in Ultimate NVIDIA is **#0**. A first-adapter bug is *accidentally
+  correct* in Ultimate and wrong in Standard. Certifying `device.rs` in Standard exercises the
+  guard on every run instead of in one scheduled excursion.
+- **#18's premise is restored honestly.** In Standard the primary desktop adapter *is* the iGPU,
+  so spec 9.7's prohibition on substituting it and #18's "must be the discrete card" requirement
+  genuinely conflict — which is the situation the guard exists for. Ultimate satisfied spec 9.7 by
+  accident of configuration, not by code.
+- **No effect on output bytes.** Same adapter, same driver, same shaders. #38 measured that
+  everything identity-bearing is identical across modes: name, `10de/28a3`, both driver
+  spellings, PCI `0000:01:00.0`, 3892 MiB dedicated, both memory budgets.
+
+**What it costs, accepted knowingly.**
+- **Hazard 2 is live again.** The dGPU power-gates, enumeration can report phantom, and adapter
+  selection needs its retry/wait path in ordinary operation. Expect slower probe runs and the
+  occasional retry inside `-WithProbes`.
+- **Long unattended exports lose a free protection.** Nothing about Standard makes an export
+  wrong, but until WP10's startup assertion exists no code can notice a silent iGPU selection.
+  Rule of thumb, not a spec requirement: develop and certify in Standard; if a multi-hour export
+  genuinely matters before the guard has been *seen to refuse something on purpose*, flip to
+  Ultimate for that run.
+- **`probe-out/` currently holds Ultimate figures** (git-ignored, regenerated). **The first act of
+  the WP06 session is to re-run `wp00_adapter` and `wp00_gpu` in Standard** and treat that as the
+  baseline. The committed 2026-11-05 evidence is Standard-mode and one day old on the same
+  driver, so it is the closer reference — but it is not today's measurement.
+
+**Two claims retracted from my own reasoning in this session:** that Ultimate "removes the
+wrong-GPU class" (#38 measured that it does not), and that cutting goldens in Ultimate was the
+better default. It was the *quieter* default, and quiet is the wrong property to certify an
+adapter guard in.
+
+**Unchanged by this choice:** #18's rules still have to be implemented — neither mode does that
+work. **Eco** mode is still unconfirmed on this machine. The reboot-to-switch requirement is
+ASUS's documented behaviour, not something measured here.
+
+No engine code changed. `BUILD_STATE.md` updated: GPU mode section (rewritten), hazard 2, the
+probe-practice note, the Display row, risk 5, and the WP06 preamble plus its owed-work item.
+
+### #40 — WP06 rulings, one correction to #38's PCI provenance, and what is parked
+
+Four prerequisite rulings the operator made on 2026-11-06 before any render code was written,
+plus a measurement that contradicts a required-reading paragraph, plus the honest state of the
+package at the end of the session that started it.
+
+#### 1. Correction to #38's "One asymmetry" paragraph — the provenances are swapped
+
+#38 states that `device_pci_bus_id` is `Some("0000:01:00.0")` on `wp00_gpu`'s report because it
+comes "from ash via `VK_EXT_pci_bus_info`", that the `None` on `wp00_adapter` comes from
+`wgpu::AdapterInfo`, and therefore that "the PCI key must come from `VK_EXT_pci_bus_info`, not
+from `AdapterInfo`" — a WP06 that hard-fails on an empty `AdapterInfo` value "hard-fails on this
+machine in *both* modes".
+
+That is inverted, and the code is unambiguous about it:
+
+| | Where the value comes from | Measured |
+| --- | --- | --- |
+| `wp00_gpu.rs:207` | **`wgpu::AdapterInfo::device_pci_bus_id`** — populated by wgpu-hal from `VK_EXT_pci_bus_info` | `Some("0000:01:00.0")` today, in Standard |
+| `wp00_adapter.rs:342` | hard-coded **`None`**, with the comment "ash's PCI bus info is a separate extension (`VK_EXT_pci_bus_info`) and this probe correlates by LUID, so the field stays empty" | `None`, and its own doc says the extension was never queried through ash |
+
+`ash` does not appear anywhere in `wp00_gpu.rs`. The committed 2026-11-05 G0 evidence shows the
+same split, so this is not a mode effect either — which is the one claim in #38 that survives
+intact: the asymmetry is real, is a provenance difference, and does not come from the GPU mode.
+
+**Ruling (operator, 2026-11-06):** the production PCI anchor is read from
+`wgpu::AdapterInfo::device_pci_bus_id`. `anim_render` therefore takes **no `ash` dependency and
+opens no second `VkInstance`**, which is the re-decision ADR-0002 consequence 6 explicitly left
+to this package. #18's operative rule is unchanged and still implemented in full: PCI bus id +
+adapter name + driver as the revalidation key, and a blank PCI id is a hard failure
+(`RenderError::PciBusIdUnavailable`), not "unknown, proceed".
+
+**Why #18's residual stays correct as written.** It says a blank means `VK_EXT_pci_bus_info` is
+unsupported and must be refused. On this machine the extension *is* supported, wgpu-hal queries
+it, and the `None` in `wp00_adapter` was an unqueried field rather than an absent extension. The
+residual's warning and its remedy are both still true; only the location of the working value
+moved.
+
+**Consequence for the two spellings of the driver.** With the wgpu-only path, production compares
+`AdapterInfo::driver` (`"NVIDIA"`) and `AdapterInfo::driver_info` (`"617.14"`) against the record
+of those same two fields. Vulkan's `617.56.0` spelling is an ash-side value and is never compared
+to a wgpu one, so #18's "comparing only one produces a false mismatch" cannot be constructed here
+at all. `the_vulkan_spelling_of_the_driver_is_never_compared_to_the_wgpu_spelling` in `device.rs`
+is the test that keeps it that way.
+
+#### 2. Asset color-space and alpha metadata arrives as manifest data (schema bumps)
+
+Spec 15.2's "Image assets carry color-space and alpha metadata" had no home: WP02's decoders are
+metadata-only by ruling (#26) and `AssetManifestEntry` has no color or alpha field. Ruled: the
+fact is **recorded at import** and travels in the manifest, not re-read from file headers at
+render time — the reason is 15.11's "no silent transfer-function fallback". A renderer that
+decided the transfer itself would be free to change its mind on a machine, driver or toolchain
+move, and a golden would stop reproducing with nothing in the project data to explain it. The
+importer classifies once from the PNG/JPEG header; the manifest stores the verdict; the render
+graph reads that verdict and fails on a missing one.
+
+This is a `MANIFEST_SCHEMA_VERSION` **1→2** bump, and because `ProjectDocument.assets` *embeds*
+the record collection (deviation row 11) it is simultaneously a `PROJECT_SCHEMA_VERSION` **3→4**
+bump with a real `migrate::V3_TO_V4`, a committed `project_v3.anim.json` fixture and a generated
+`schemas/project/v4.json` — the fourth time this exact prerequisite gap has been closed this way
+(#33 for events, #35 for the tick rate).
+
+Classification rules, as implemented: PNG `sRGB` chunk → sRGB; PNG `gAMA` = 1.0 → linear; PNG
+`iCCP`/`c2PC` or JPEG `APP2` ICC → `Unclassified` **plus an import diagnostic**, because an ICC
+profile we do not model must be reported rather than approximated (the `PixelLayout::Unknown`
+precedent in `image.rs`); JPEG and unmarked PNG → sRGB, recorded as a decision written into
+hashed data at import, not an inference made at render. PNG alpha is straight by definition;
+no-alpha is opaque.
+
+`Unclassified` has exactly one producer: `V3_TO_V4`. Opening a pre-WP06 project is the honest
+failure it should be — the document loads, edits and saves, and `extract_frame` refuses to render
+with `UnclassifiedAssetMetadata` naming the asset and the remedy (classify it by re-importing).
+An inferred default would be the silent fallback 15.11 forbids.
+
+#### 3. `scene_output` is `Rgba8Unorm` with the transfer in `output.wgsl`
+
+15.6 calls it "explicit export or surface-compatible output format" and 15.12 requires "exactly
+one output transfer"; WP00 probed no output format and ADR-0003 left the choice here. Ruled:
+`Rgba8Unorm`, **not** the `Srgb` variant, with the linear→sRGB encode performed in the shader. The
+reason is testability: an `Srgb` format puts one transfer in fixed-function state where the golden
+cannot attribute it, and the moment a second transfer is added somewhere in the chain the two are
+indistinguishable in the output. With a linear-storage format the transfer is a named stage in the
+pass log, and the "exactly one" clause becomes a claim about a stage rather than about hardware.
+
+#### 4. The post chain is the graph plus one tone-map stage; the effects stay disabled
+
+15.3 lists `post.wgsl` with "DOF, motion blur, bloom and tone-map entry points", 15.5 step 7 asks
+for "the fixed-order HDR post chain and one tone-map stage", and 29 (WP14) and 32 (WP17) own the
+effects' parameters. Ruled: implement the chain, the ping-pong, the versioned order, the
+disabled-pass rule and exactly one tone map. DOF, motion blur and bloom are declared-and-disabled.
+Their kernels are not this package's design decisions, and writing them now invents parameters
+WP14/WP17 will replace. The disabled-pass contract itself is **tested** (a disabled stage declares
+no reads and no writes and returns its input target), which is the part WP14 depends on.
+
+#### 5. The VRAM floor runs through DXGI, matched by vendor/device, and is a warning when it cannot be attributed
+
+#18 decision 2 calls `DedicatedVideoMemory` a required guard; the probe read it because it already
+had a `GetDesc1` call. Production has no such call, so `anim_render` takes the target-gated
+`windows` dependency 15.4 already lists and enumerates DXGI adapters, matching on
+`(VendorId, DeviceId)` — the cross-check 9.7 already prescribes — not by LUID (that needs a second
+`VkInstance`, and #18 decision 4 confines LUID work to WP07's budget attribution) and not by
+ordinal (#38/#39 make an ordinal a property of the GPU mode, not the board).
+
+Exactly one match applies the floor as a hard guard. Zero or many matches is
+`VramFloor::Indeterminate`, **reported rather than silently passed** (9.11), and it is a warning
+rather than a refusal because the selection itself is already anchored on the PCI bus id, which is
+the field `DXGI_ADAPTER_DESC1` does not have. The residual is stated: on a machine with two
+identical NVIDIA cards the floor cannot be attributed without WP07's LUID correlation.
+
+#### 6. Device loss, features and formats
+
+`required_features` stays `Features::empty()` — ADR-0003's own decision says a capability list
+gathered from a device opened with extra features is not the list WP06's device has, and every
+usage this graph needs is core. The ADR-0003 half it left open closes as an explicit requirement
+list checked on the *adapter* before `request_device`: `Rgba16Float` (attachment + binding + copy),
+`Depth32Float` (attachment + binding), `Rgba8Unorm` (attachment + binding + copy), `sample_count`
+1, no multisampling, because 15.6's table names none and a resolve pass would have no owner.
+Loss is detected through `set_device_lost_callback` recorded in a `OnceLock` — not a `Mutex`, which
+`clippy.toml` bans near canonical output — and 15.7's "previous transforms update only after
+successful submission" is structural: `commit_submission` is the only writer of history and
+`graph.rs` calls it after `submit`.
+
+#### 7. Two 15.8 shapes gained a field, and one error variant was dropped rather than declared
+
+`DrawItem` gains `previous_valid: bool` (15.7's per-item "history is invalid" condition is
+invisible to a shader that cannot know whether the node existed last submission). `RenderTargets`
+gains `scene_output`, which 15.6's target table names and 15.8's struct omits. `AlphaMode` is
+verbatim. `UnsupportedAlphaMode` was **not** added to `RenderError` even though 15.7 says
+extraction validates "supported alpha modes": `AlphaMode` is a closed five-variant enum and all
+five have descriptors, so no condition can produce that refusal — WP05's
+`RandomError::UnsupportedAlgorithm` deletion is the precedent, and a declared-but-unreachable
+variant reads as covered error handling in a later audit. The reachable half of the same sentence
+is `InvalidAlphaCutoff`, which does have a producer and a test.
+
+#### 8. What this session reached, and what is parked
+
+WP06 is **not code complete** and must not be read as if it were. Written: `device.rs`,
+`targets.rs`, `camera.rs`, `alpha.rs`, and first drafts of `graph.rs` and `draw_list.rs`. The last
+two reference functions and fields that do not exist yet (a `DrawItem::opacity()` reading a field
+that was never added, `claims_for()` as a `None` stub that would make every extraction fail,
+pipeline signatures the pass modules do not have), and none of `resources.rs`, `readback.rs`, the
+five pass modules, the five WGSL files, `tests/golden.rs`, ADR-0010 or ADR-0011 was started.
+
+Ruled on how to land it: the manifest/project schema slice is committed on its own as a labelled
+prerequisite commit — it is self-contained, its own tests decide whether it is right, and it is
+the thing 15.2 asks for — and the renderer files move to `crates/anim_render/wip/`, which cargo
+does not compile, so the gate returns to green and verified rather than red-and-explained.
+`lib.rs` declares no modules from `wip/`, and the directory carries a README stating that the code
+is unbuilt, unvalidated and partly invented. A future session treats it as notes, not as a
+reference implementation.
+
+**How to apply:** the four rulings above are the contract; the parked files are an unverified
+sketch against it. Anyone resuming WP06 re-derives the pass, draw-list and uniform shapes from
+spec 15.7–15.9, not from `wip/`.
+
+#### 9. The slice was delegated, ran out of turns, and two of its consequences were not optional
+
+The schema slice went to a subagent with a fixed contract and a 150-turn budget. It wrote 1,701
+lines into the right files with the right shapes, and then hit the cap mid-implementation — its
+last message was "Now I'll implement. Starting with `image.rs`:" after 175 tool calls, most of
+them reads. What reached this chat was therefore ~90% done and **red**, not done, and the gate is
+what said so: it found a fifth 7-argument call site in `anim_commands`, then a sixth in
+`anim_test_support`, then a stale expectation in `anim_headless`.
+
+Two lessons, both about the gate rather than the agent:
+
+- **A `tail`-piped gate reports the pipeline's exit code, not the gate's.** My first verification
+  run showed "exit 0" because `cmd //c tools\ci.cmd | tail -40` exits with `tail`'s status. The
+  same command, redirected to a file and read directly, returned 1 and named two failing steps.
+  Any future "the gate passed" claim must come from the gate's own summary line, and this is the
+  second time in the project that a wrapper has laundered a result (#19's hosted-CI file would
+  have done the same by declaring coverage that never runs).
+- **Classifying at import is stricter than WP02 was, and the strictness is the point.** Now that
+  the record's claims are derived from the stored header, `anim_assets::import` refuses payload
+  bytes that carry no PNG or JPEG signature — `UnsupportedDecoder` — where before it accepted
+  anything labelled `Image`. Three suites were importing strings like `b"an imported payload"` as
+  cels. They were given real minimal PNGs rather than looser assertions, because a test that
+  imports arbitrary bytes as an image would keep passing after the classification rule was
+  deleted, which is the exact shape of unenforced coverage this project keeps finding.
+
+`anim_headless`'s replay report prints `document.schema_version`, so its `schema_version 3`
+expectation became 4 with this bump. The report's own `wp05-replay/1` tag did not move, and the
+test comment says which of the two numbers a format change is supposed to touch.
+
+**How to apply:** a bounded, decided slice can be delegated, but budget for the reading. Anything
+with more than a handful of files to *understand* before the first edit needs either a larger turn
+allowance or its own research pass first — and the finishing is only mechanical while the gate
+keeps coming back green, which is the part that took three cycles rather than zero.
+
+

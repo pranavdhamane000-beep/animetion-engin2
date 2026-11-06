@@ -36,13 +36,63 @@ below (see DECISIONS.md #6 for how that happened).
 
 **Do not key any check on a LUID value.** The 2026-11-04 probe recorded NVIDIA
 `00cb5c07-00000000`; the 2026-11-05 WP00 adapter probe measured `0000000000011af8`
-on the same machine and the same driver. LUIDs change between enumerations, so spec
+on the same machine and the same driver; the 2026-11-06 re-run measured
+`0000000000011764`. Three runs, three values. LUIDs change between enumerations, so spec
 9.12's "no passing on a different adapter/driver without revalidation" is keyed on
 adapter name, vendor/device id and driver version. See ADR-0002 consequence 2.
 
 **The driver has two spellings.** Vulkan's `driver_version` reads `617.56.0`; wgpu's
 `driver_info` and the Windows driver read `617.14`. Both are in the evidence files.
 Comparing only one produces a false mismatch.
+
+### GPU mode: the operator's standing choice is **Standard** (hybrid) — DECISIONS.md #38, #39
+
+The operator ruled on 2026-11-06 that he will run **Armoury Crate → GPU Modes → Standard**
+(hybrid) on this FX607VBR rather than **Ultimate** (dGPU-only). **Standard is therefore the
+configuration WP06 is developed and certified in.** (ASUS also documents an **Eco** mode said to
+disable the dGPU outright; **not confirmed present on this machine and never measured here** —
+treat it as a hypothesis until the operator says it is in the list.) Switching modes is normally
+documented as needing a reboot; that has not been measured here.
+
+Consequence for the measurements below: they were taken the same day **in Ultimate**, so they are
+the *variant* snapshot, and the committed 2026-11-05 hybrid evidence is the matching baseline
+again. **The first thing a WP06 session does is re-run `wp00_adapter` and `wp00_gpu` in Standard**
+to re-baseline ordinal, budget and retry behaviour before `device.rs` reads any of it. Nothing in
+`docs/adr/evidence/wp00/` was overwritten by the Ultimate run.
+
+- **Ordinal is a property of the GPU mode, not of the board — never use it as a selection key.**
+  Measured: **Ultimate** enumerates NVIDIA at DXGI **#0**; the committed **Standard** evidence has
+  NVIDIA at **#1**, which means **in the mode we now run, ordinal 0 is the iGPU**. A
+  "take the first adapter" bug is therefore *correct* in Ultimate and *silently wrong* in
+  Standard — so staying in Standard is what makes that class of defect observable rather than
+  hypothetical.
+- **The iGPU is still present and still selectable.** `Win32_VideoController` lists
+  `Intel(R) Graphics` `VEN_8086&DEV_A7AB` Status OK, and `vulkaninfo --summary` still reports it
+  as `PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU` (api 1.3.297, driver 101.6314). Discrete-only mode
+  moves the panel; it does not remove the adapter. DECISIONS.md #18's adapter-identity rules are
+  therefore **still required in full** — the setting does not substitute for them.
+- **Unchanged, so G0 carries:** adapter name, vendor `0x10DE` device `0x28A3`, driver
+  `617.56.0`/`617.14`, PCI `0000:01:00.0`, `DedicatedVideoMemory` 3892 MiB, and both memory
+  budgets, identical to the committed figures.
+- **What Ultimate changed, and why Standard is harder — which is the point of choosing it.** In
+  Ultimate the NVIDIA adapter owned the desktop (1920x1200 @144 Hz, the recorded mode) while Intel
+  reported **no active resolution at all**: no output, but still a fully enumerable Vulkan and
+  DXGI device. In **Standard** the iGPU drives the panel again, so the engine must select a
+  **non-desktop adapter deliberately** — spec 9.7's prohibition on substituting the primary
+  desktop adapter and #18's "must be the discrete card" requirement pull in opposite directions
+  there, and that tension is the guard's actual job. Whether the Intel adapter can complete this
+  engine's render graph was **not** tested; the narrower point holds regardless — nothing in the
+  enumeration makes a wrong-GPU selection announce itself. Only code closes it, and in Standard
+  that code gets exercised on every run.
+- **`device_pci_bus_id` has two provenances and they disagree — but not the way this row said
+  until 2026-11-06.** `Some("0000:01:00.0")` comes from **`wgpu::AdapterInfo`** (read by
+  `wp00_gpu.rs:207`; wgpu-hal queries `VK_EXT_pci_bus_info` for us), and `None` comes from
+  `wp00_adapter.rs:342`, where ash **never queries the extension** and the field is hard-coded
+  empty. `ash` does not appear in `wp00_gpu.rs` at all. A re-run of both probes in **Standard** on
+  2026-11-06 confirms it. So a hard-fail on an empty PCI id is implementable on the `AdapterInfo`
+  path and succeeds here in both GPU modes — DECISIONS.md #38's original attribution and #40's
+  correction are the record, and ADR-0002 consequence 6's "WP06 will re-decide whether production
+  needs raw Vulkan" is decided: **it does not**.
 
 ### Build hazards found by the probe — both must be respected
 
@@ -62,6 +112,10 @@ Comparing only one produces a false mismatch.
    conclude there is no discrete GPU.** Adapter enumeration needs retry/wait and
    must report the phantom state explicitly rather than falling back to the iGPU
    (spec 9.7 forbids substituting the primary desktop adapter).
+   **2026-11-06:** in **Ultimate** both probes resolved on attempt 1 and no phantom state
+   appeared. The operator has since chosen **Standard** as the standing mode, so this hazard is
+   **active again** and the retry/wait path is the everyday case, not the exception. Probe output
+   in `probe-out/` from the Ultimate run must not be read as Standard-mode behaviour.
 
 Also: `deviceLUIDValid = true` on both adapters, so the spec's LUID correlation is
 satisfiable here — proven in ADR-0002. No Vulkan validation layers installed (only
@@ -77,7 +131,10 @@ with `setx`, so a shell started before that — including this app's Git Bash �
 install, a stale environment block.
 
 Display: single built-in panel 1920x1200 @144 Hz, DPI 120 — relevant to WP10's
-preview surface and to any golden frame sized against the window.
+preview surface and to any golden frame sized against the window. The **mode and DPI are stable
+across GPU modes**; what changes is which adapter drives the panel — measured under NVIDIA in
+Ultimate on 2026-11-06, and it returns to Intel in **Standard** (expected from the Nov-5
+measurement, not re-verified after the operator's switch).
 
 ### Pen input: removed from scope
 
@@ -90,8 +147,11 @@ have no consumer anywhere in the pipeline. See DECISIONS.md #8 and Deviations be
 **Consequence: G0 is now fully achievable on this machine.** Pen was the single
 prerequisite it could not meet.
 
-Also worth knowing before writing GPU probes: this is a hybrid-graphics Optimus
-laptop, so the discrete GPU may be power-gated at probe time (see hazard 2 above).
+Also worth knowing before writing GPU probes: this is a hybrid-graphics Optimus laptop, so the
+discrete GPU may be power-gated at probe time (see hazard 2 above). The operator's standing mode
+is **Standard**, which is the configuration where that happens; **Ultimate** was measured once on
+2026-11-06 and suppressed the symptom without removing the iGPU — see the GPU mode section and
+DECISIONS.md #38.
 
 ## Stage plan
 
@@ -114,13 +174,68 @@ reverts to code-complete-plus-outstanding-approval from WP06. The framebuffer, a
 velocity output of this package is exactly the aesthetic judgement the spec reserves for the
 operator, so the deliverable is a passing suite *plus* a recorded outstanding approval.
 
+### Status as of 2026-11-06: IN PROGRESS, split across two commits, and not code complete
+
+The four prerequisite rulings the operator made are **DECISIONS.md #40**, and they are settled —
+do not re-open them. Read #40 first; it decides the PCI anchor source (no `ash` in production),
+the asset-metadata schema bump, `scene_output = Rgba8Unorm` with the transfer in the shader, and
+the post chain stopping at the graph plus one tone map. It also corrects DECISIONS.md #38's PCI
+provenance paragraph, which is inverted, and this file's Environment facts row now says so.
+
+What landed, and what did not:
+
+| Slice | State | Where |
+| --- | --- | --- |
+| Asset color-space and alpha metadata — `ImageColorSpace` / `ImageAlpha` / `ImageAssetClaims` in `anim_assets::image`, `AssetManifestEntry.image: Option<ImageAssetClaims>` encoded last, `MANIFEST_SCHEMA_VERSION` 1→2, `PROJECT_SCHEMA_VERSION` 3→4, `migrate::V3_TO_V4`, `project_v3.anim.json`, `schemas/project/v4.json` from the versioned `tools/make_v4_schema.py` | **committed 2026-11-06** as WP06's prerequisite; gate green, 605 tests (was 585); deviation row 19, DECISIONS.md #40 rulings 2 and 9 | `crates/anim_assets`, `crates/anim_project`, `schemas/`, `tools/` |
+| `device.rs`, `targets.rs`, `camera.rs`, `alpha.rs` | **written, compiled only in part, never run** — notes, not a reference | `crates/anim_render/wip/` |
+| `graph.rs`, `draw_list.rs` | first drafts that **reference functions and fields that do not exist**; see #40 §8 for the three named defects | `crates/anim_render/wip/` |
+| `resources.rs`, `readback.rs`, the five `passes/*`, the five `shaders/*.wgsl`, `tests/golden.rs`, ADR-0010, ADR-0011 | **not started** | — |
+
+**What the schema slice changed that a render package can now rely on, and one thing it changed
+that it will trip over.** `entry.image` is the only source of an asset's colour space and alpha
+mode, and its spellings are `srgb`/`linear`/`unclassified` and `opaque`/`straight`/`unclassified`
+— `#40 §2` is the rule table, and PNG alpha is `straight` **by the format's definition**, not by
+inference. Premultiplication is deliberately *not* metadata: it is a decode choice made against a
+`DecoderConfiguration`, so it belongs to the derived-cache key and not to the record. Second:
+`anim_assets::import` now **refuses** payload bytes with no PNG/JPEG signature when the kind is
+`Image`, because the claims have to come from somewhere real — so any fixture that imported a
+string as a cel is now wrong, and three were (`#40 §9`). Do not soften those assertions again.
+
+`crates/anim_render/wip/` is not compiled by cargo and `src/lib.rs` declares no modules from it.
+That is deliberate: AGENTS.md forbids carrying a half-built package into a fresh context, and the
+gate is the argument — a red gate that has to be explained is a gate a later session will
+distrust. **Treat `wip/` as a sketch against #40's contract, re-deriving every shape from spec
+15.7–15.9 rather than from those files.** The verified parts of the two schema commits' work are
+their own tests; nothing in `wip/` is verified.
+
+**For the resuming session:** start from 15.5's thirteen steps with #40's contract, and build
+`resources.rs`/`readback.rs`/`graph.rs`/`draw_list.rs` together, because the uniform and instance
+layouts are the only place the CPU and WGSL agree — inventing them twice (once in Rust, once in a
+`.wgsl`) is how a stride and a binding disagree and the golden comes out a solid colour. The
+`ImageAssetClaims` a DrawItem's alpha mode depends on are reachable only from the document's
+embedded manifest, which `extract_frame`'s 15.9 signature does not receive; deciding that seam is
+a real design question, not a plumbing detail, and #40 §2 is the context for it.
+
 Before starting WP06: read spec section 15 in full (15.2 prerequisites, 15.4 dependencies, 15.5
 the thirteen-step implementation sequence, 15.6 internal logic, 15.7 algorithms, 15.8 data
-structures, 15.11 errors, 15.12 validation), then **DECISIONS.md #18 in full** — the adapter
-identity rules (PCI bus id anchor, `DedicatedVideoMemory` floor, startup assertion, LUID kept
+structures, 15.11 errors, 15.12 validation), then **DECISIONS.md #18 in full** and **#38** — the
+adapter identity rules (PCI bus id anchor, `DedicatedVideoMemory` floor, startup assertion, LUID kept
 for WP07 only, `power_preference: HighPerformance` rejected as a sole rule) are constraints on
 `device.rs` and nothing enforces them; risk 8 below is the statement that a WP06 which does not
-read #10 will not be told. Then `docs/adr/ADR-0002` (adapter selection, and consequence 2's
+read #18 will not be told. **#38 is not optional reading:** the machine runs **Standard** (hybrid),
+so the iGPU is enumerable, drives the panel, and occupies **DXGI ordinal 0** — the configuration
+where a first-adapter bug picks the wrong card silently. **#38's PCI-provenance paragraph is wrong,
+and DECISIONS.md #40 corrects it:** the working `Some("0000:01:00.0")` comes from
+`wgpu::AdapterInfo` (wgpu-hal queries `VK_EXT_pci_bus_info` for us) and the `None` is a hard-coded
+`None` on the ash side that never queries the extension — so `device.rs` takes **no `ash`
+dependency and opens no second `VkInstance`**, which is the re-decision ADR-0002 consequence 6 left
+to this package, and #18's hard-fail on an empty bus id is still fully implementable.
+**The Standard re-baseline is DONE (2026-11-06).** Both probes pass in Standard: NVIDIA correlates
+at **DXGI #1**, so ordinal 0 is the iGPU in the mode we run; `DedicatedVideoMemory` 3892 MiB and
+both memory budgets are byte-identical to the committed G0 figures; the LUID moved again, a fourth
+distinct value in four runs, which is #18 decision 1 confirmed rather than a problem. Figures are in
+the Environment facts row and in #40.
+Then `docs/adr/ADR-0002` (adapter selection, and consequence 2's
 amended revalidation key), `ADR-0003` (required formats and the `Rgba16Float` result),
 `ADR-0001` (the dependency lock), and `BUILD_STATE.md`'s Environment facts table.
 
@@ -151,15 +266,21 @@ pins formats. **Do not settle it inside a WGSL file.**
 
 **Not for WP06, but do not lose it:** DECISIONS.md #18's adapter rules; the owed WP07
 telemetry-versus-static-budget question (BUILD_STATE risk 24, still unanswered — do not read
-the silence as approval); and the four open questions in the memory note, of which the MUX /
-Advanced Optimus one is free for the operator to check and a yes deletes the whole wrong-GPU
-class before `device.rs` writes any of it.
+the silence as approval); and the four open questions in the memory note. **The MUX one is now
+answered, twice over.** First the answer was *no*: the operator put the machine in Armoury Crate's
+**Ultimate** (dGPU-only) mode on 2026-11-06 and DECISIONS.md #38 measured that the iGPU remains
+enumerable, so no environment setting deletes the wrong-GPU class and `device.rs` still has to
+implement #18. He then chose **Standard** as the standing mode anyway, on the reasoning that
+Standard is where a first-adapter bug actually surfaces. **That withdraws the "owed one Standard
+run" item** — it is no longer a special excursion, it is the default environment. What replaces it:
+re-baseline the two GPU probes in Standard before `device.rs` reads anything, and expect hazard 2's
+retry path to fire during ordinary work rather than only in a controlled test.
 
 ## Completed Work Packages
 
 | WP | Gate | Status | Validated | Evidence | What later packages must know |
 | --- | --- | --- | --- | --- | --- |
-| WP00 Repository and Platform Risk Prototypes | **G0** | **validated** | 2026-11-05, CI gate added same day | `docs/adr/ADR-0001`, `0002`, `0003`, `0006`, `0014`, `0015`; reports in `docs/adr/evidence/wp00/`; gate at `tools/ci.ps1` | Locked toolchain rustc 1.99.1 MSVC. Vulkan compute readback works exactly on the RTX 3050 A; `Rgba16Float` attachable; `max_buffer_size` 1 TiB. Vulkan↔DXGI correlate by LUID — and **ordinal 0 is the iGPU here**, the discrete adapter enumerated at index 1. `MoveFileExW(REPLACE_EXISTING\|WRITE_THROUGH)` satisfies never-mixed-bytes; `ReplaceFileW` cannot, by its own documentation. FFmpeg pinned by SHA-256 and verified before spawn. **FFmpeg exits 0 on truncated video input, and audio frame counts are unreadable from the container (48 000 reads back as 12)** — so WP09 counts video from `-count_frames` on the output and audio from decoded PCM. 5 probes, not 6: `wp00_pen` cancelled. |
+| WP00 Repository and Platform Risk Prototypes | **G0** | **validated** | 2026-11-05, CI gate added same day | `docs/adr/ADR-0001`, `0002`, `0003`, `0006`, `0014`, `0015`; reports in `docs/adr/evidence/wp00/`; gate at `tools/ci.ps1` | Locked toolchain rustc 1.99.1 MSVC. Vulkan compute readback works exactly on the RTX 3050 A; `Rgba16Float` attachable; `max_buffer_size` 1 TiB. Vulkan↔DXGI correlate by LUID — and **ordinal 0 is the iGPU here**, the discrete adapter enumerated at index 1. **That ordinal is mode-dependent, not a board fact: Armoury Crate Ultimate enumerates NVIDIA at #0, Standard (the standing mode) at #1 — DECISIONS.md #38, #39. Never select by ordinal.** `MoveFileExW(REPLACE_EXISTING\|WRITE_THROUGH)` satisfies never-mixed-bytes; `ReplaceFileW` cannot, by its own documentation. FFmpeg pinned by SHA-256 and verified before spawn. **FFmpeg exits 0 on truncated video input, and audio frame counts are unreadable from the container (48 000 reads back as 12)** — so WP09 counts video from `-count_frames` on the output and audio from decoded PCM. 5 probes, not 6: `wp00_pen` cancelled. |
 | WP01 Canonical Rational Time and Stable Identity | **G1** | **validated** | 2026-11-05, gate green same day | `docs/adr/ADR-0004`; `crates/anim_core/src/{rational,time,id,hash,error}.rs`; `crates/anim_core/src/io/{atomic_replace,windows}.rs`; `crates/anim_core/tests/time_properties.rs` (28 tests) plus 48 unit tests | `Rational` persists as one string `"num/den"` — reduced, positive denominator, zero is `0/1` — and **parsing refuses a non-canonical spelling**, so no downstream loader may "normalize on read". Arithmetic runs in `BigInt` and reduces **before** the `i128` width check. `FramePos::subframe` is **private** with a hand-written `Deserialize`, because `(frame, subframe)` is a snapshot cache key and a map sort key: `5 + 3/2` and `6 + 1/2` are one instant, and letting both exist splits the key (DECISIONS.md #22). Floor, not truncation, so a negative exact boundary selects the preceding frame. Typed IDs are **v5-derived — there is no entropy source anywhere in the graph** — and their order is over the 16 bytes, implemented locally rather than inherited from `Uuid`, which is caret-pinned. Canonical bytes: little-endian widths, `u64` length prefixes, domain tag first; that layout is what spec 11.7's "length-prefixed canonical fields in order" will consume. `anim_core::io::atomic_replace::write_atomic` is the shared replacement API on ADR-0006's sequence, and **deviation row 7 is a live instruction for WP03**. The sample index overflows near frame 5.76e15 while the frame number does not, so clipping is a boundary decision for WP08/WP09, not a type decision here. |
 | WP02 Immutable Assets and Content Manifest | **G2 (joint with WP03)** | **validated** (spec 11.12 in full; **G2 claimed jointly at WP03, 2026-11-06**) | 2026-11-06, gate green same day | `docs/adr/ADR-0005` (manifest half closed, the document half left open for WP03); `crates/anim_assets/src/{hash,manifest,store,import,resolver,decode,image,audio}.rs`; `crates/anim_assets/tests/store.rs` (19 tests) plus 72 unit tests; `crates/anim_core/src/io/atomic_replace.rs` (`StagedWriter`/`Staged`); `crates/anim_assets/tests/fixtures/blake3_test_vectors.json` | `ContentHash` is 32 bytes with exactly one text spelling (64 lowercase hex, which is also the object file name), and it hashes into a record **raw — not length-prefixed, not hex**: ADR-0004's UUID rule, not its rational rule (ADR-0005 Decision 3). Object paths are `assets/objects/<2>/<2>/<64 hex>` derived from the digest alone, so a display name can never reach a path, and `AssetStore::parse_object_name` is why a `.import.N.tmp` is not an object. Import streams in 64 KiB chunks, hashes and counts, **re-hashes the staged temporary before publishing** (the lost-write proof belongs there, not after the rename) and then renames without overwrite, so a failure leaves no record, no temporary and no partial object. `manifest_digest` = domain `anim_engine/manifest/v1` → `schema_version u32` → **record count u64** → records in `AssetId` byte order, where the order comes from the `BTreeMap` rather than from a sort step. `AssetManifestEntry.dependencies` is **private** (sorted and deduplicated at construction, hand-written `Deserialize`) on DECISIONS.md #22's reasoning, which overrides spec 11.8's `pub` listing — deviation row 9. `import` returns a record and mutates nothing (spec 11.4); `UpsertAsset` is WP03's. Decoders are **metadata-only**: `image.rs` parses PNG/JPEG headers itself and `audio.rs` uses the already-pinned `hound`, because spec 5.1 names no image decoder and pixel/PCM decode has no consumer until WP06/WP08 (DECISIONS.md #26) — the seam is `Decoder::read_metadata` plus `DecoderConfiguration`. `ContentHash` is the type spec 12.8's `AppliedTransaction.envelope_hash` names, so no second hash type. Two read passes per import is the documented cost (DECISIONS.md #30). |
 | WP03 Commands, Undo, and Atomic Project Persistence | **G2 (joint with WP02) — G2 PASSED 2026-11-06** | **validated** | 2026-11-06, gate green same day | `docs/adr/ADR-0005` (**closed**: Decisions 9–12, Consequences 5, 7, 8, schema/version impact), `ADR-0006` (**closed**: Recovery policy section, Consequences 4, 5, 6); `crates/anim_project/src/{document,scene,property,schema,migrate,save,recovery}.rs`; `crates/anim_project/tests/persistence.rs` (14 tests) plus 53 unit tests; `crates/anim_commands/src/{command,envelope,registry,processor,history,dry_run}.rs`; `crates/anim_commands/tests/atomicity.rs` (14 tests) plus 39 unit tests; `schemas/project/v1.json`, `schemas/commands/v1.json`; `crates/anim_test_support/src/bin/wp03_save.rs` + `tests/wp03_fault_injection.rs` (5 scenarios); DECISIONS.md #31, #32 | **The `CommandProcessor` is the only writer** — 12.6's sentence is implemented as one private function, `execute`, that every path (`apply`, `undo`, `redo`) routes through, so "never commit a batch prefix" is structural rather than remembered. The command set is **twelve and closed under inversion**: `Upsert`/`Remove` asset, scene, track; `Add`/`Remove` node; `Set`/`Remove` property key; `Place`/`Remove` marker — 12.12's exact inverse requires both halves of each pair (#31.2). `SetPropertyKey` **refuses an unknown track id** rather than creating one, so no command has two inverses (#31.3). Acceptance runs in 12.7's order with **replay checked before the revision**, because a replay after an undo is legitimately at a different revision (#31.5). `undo`/`redo` **move** a transaction between stacks and change only `resulting_revision`; the first implementation mirrored it and made redo re-apply the inverses (#32.2). `AppliedTransaction` carries a fifth field `transaction_label` and `CommandOutcome.command_id` is `Option` (`None` for undo/redo) — both recorded additions (#31.4). History is **unbounded by ruling** (#31.9). **`serde_json::Value` does not preserve member order** (its map is a `BTreeMap`), so canonical bytes exist only on the direct `to_vec` path; `upgrade_with` returns a current file's bytes unchanged rather than re-emitting a `Value`, and `recovery::CompleteCandidate::canonical` reports a valid-but-non-canonical file instead of rewriting or trusting it (ADR-0005 Consequence 7). Document field order **is** spec 12.8's declaration order (Decision 9); the document's, the manifest's and the envelope's `schema_version`s are three independent numbers, each validated at its own boundary (Decision 10); the record collection is **embedded, not re-encoded**, so `manifest_digest`'s pre-image is unchanged by living in a document and is recomputable from a saved file with no engine (Decisions 11, Consequence 8). `save_atomic` stages through `StagedWriter`/`publish` **and then byte-compares the destination itself**, because `write_atomic`'s boundaries are not observable and 12.12 requires faults and kills at each one (deviation row 7 is now reconciled in code, ADR-0006's policy section). Recovery **reads and never writes** — proven by comparing the whole directory listing with digests before and after (`inspection_and_selection_write_nothing_anywhere`); `AmbiguousLineage` is a **warning**, not an error. The kill suite asserts its own residue: the two mid-sequence boundaries **must** leave exactly one `.tmp`, otherwise a late kill would silently test a completed save (#31.13, #32.6). Every rule the save classifier owns has a corruption that fires it, including a newer autosave (#32.7). **Deferred with a deadline at WP04:** no motion layer, no event definition, no easing beyond `Linear`/`Step`, no camera or audio-cue data — 13/15/17 own those rules, and 13.5/13.7 need them, so WP04's first decision is a raw-schema bump **plus** a real `migrate::chain()` step (the machinery is built and proven by a test-only chain). `schemas/export/` is WP09's. Autosave cadence and retention are nowhere in spec 12 and were not invented. |
@@ -207,7 +328,8 @@ so read this table before starting WP00 or WP10.**
 | 16 | 14.3 (file list), 4.2, 15.3 | **WP05's file and target additions.** `crates/anim_sim/src/context.rs` is a twelfth file: 14.9 defines `SimulationContext` and `SimulationInputFrame` and 14.3 assigns neither to any of the eleven. The alternatives were putting a driver for every other module inside one of them, or re-exporting a type from the file that consumes it. `crates/anim_headless` gained a library target (`src/lib.rs`) beside its binary, because 14.12's fresh-process clause needs a child process and `CARGO_BIN_EXE_` names only binaries in the same package — without the library, `src/bin/wp05_replay.rs` would restate the reporting code instead of calling it. Four files spec 14.3 does not list in `anim_test_support`: `src/wp05_fixture.rs`, `src/bin/wp05_replay.rs`, `tests/wp05_isolation.rs` and `tests/fixtures/philox4x32_10_test_vectors.json` (+ its `PHILOX_VECTORS_NOTE.md`). 14.3 lists `src/determinism.rs` and `anim_sim/tests/determinism.rs`, and neither can hold the two-process clause or the published vectors. Same class as rows 4, 5, 8, 10, 12 and 13. | 2026-11-06 |
 | 17 | 14.4 (dependency list), 14.9 (signatures), 14.8 (`SimState`) | **Five shape departures in `anim_sim`.** (a) `anim_sim` depends on `anim_project`, which 14.4's list omits — 14.9's own `SimulationContext` "owns immutable project/evaluation inputs", `anim_scene` re-exports none of those types, and the prohibition 14.4 actually states (no `anim_commands`, renderer, audio device, editor, wall clock) holds. (b) 14.9's parameter type `SimulationSettings` is the persisted section's name in `anim_project`; the resolved carrier here is `SimSettings { clock, project_seed, solver_iterations }`, because the clock needs the document's frame rate and copying it into the section would give one timeline two rate bindings. (c) `seek` and `prepare_export` take `&mut SimulationContext` where 14.9 writes `&`: the context owns WP04's `SnapshotCache`, which is owned-and-mutable rather than locked (#22, `clippy.toml`), and a shared borrow cannot fill it. (d) `SimState` carries a ninth field, `presentation`, **excluded from the canonical encoding** and cleared by `restore_checkpoint`; 14.8's list has no ledger, 14.9 requires `SimulationMode` to control something, and 14.12 requires warm-up and sequential runs to hash alike — including it would break the second through the first. (e) `RandomError` has three variants, not the four implied by 14.7's "lane above three, negative tick or overflow returns an error" plus a gate: `UnsupportedAlgorithm` was deleted because nothing in a `StreamKey` identifies an algorithm, and 14.11's unsupported-algorithm refusal is produced at `restore_checkpoint` where a version arrives from data. DECISIONS.md #35 rulings 3, 5, 8; `ADR-0008` Decisions 6, 7. | 2026-11-06 |
 | 18 | 14.7, 14.8, 14.9 | **Types the spec names and never defines, and one key-width gap.** 14.8 writes `pub springs: Vec<Spring>` and 14.7 requires the checkpoint encoder to hash "particles/springs in stable ID order", but `Spring` has no field list anywhere in the document — spec 29 (WP14) defines `SecondaryChainComponent`/`ChainParams`/`ChainNode`/`ChainRuntime` and never mentions `Spring` or `SpringBody`. Here a spring is an edge from a kinematic anchor node to a dynamic body with a rest length measured at initialization, and bodies are the evaluated nodes that have a parent, because `EvaluatedNode.parent` is the only chain structure a snapshot carries (`SimulationInput` has no parent field by design). **The consequence is that any authored node hierarchy is a spring chain in WP05**; it does not change what the scene evaluator reports, and WP12/WP14 narrow the set when they add component data. `SimulationFrame`, `SimulationInputFrame`, `SimulationContext`, `SimulationMode` and `AlgorithmVersions` are likewise 14.8/14.9 names without fields. Separately, and this is the one that is a spec contradiction rather than an omission: **14.7 derives a 128-bit key and splits it into two `u64`, and Philox4x32's key is 64 bits.** Random123 documents it as half as wide as the counter and `philox4x32_key_t` is a two-word `u32` array, so a literal implementation feeds the primitive 64 of its 128 derived bits and discards the rest silently — two `StreamKey`s differing only in a dead half would draw identical numbers. The derivation now XOR-folds derived words 0 with 1 and 2 with 3, so every derived bit influences every draw, the permutation is untouched and still certified by 55 published vectors, and the entropy ceiling is the primitive's own. If a 128-bit-key Philox4x32 is genuinely wanted, no published vectors exist for it and it is a spec change, not a constant edit. DECISIONS.md #35 rulings 6, 7; `ADR-0008` Decisions 2, 3; `ADR-0009` Decisions 6, 9. | 2026-11-06 |
-Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, #22–#36, and the ADRs. Rows 7 and 11 are the two WP03 packages touch; row 7 is now reconciled in code and ADR-0006 carries the policy. Rows 12, 13 and 14 are WP04's; rows 15, 16, 17 and 18 are WP05's, and row 11's `Easing has two variants` clause is superseded by row 12.
+| 19 | 11.8 (`AssetManifestEntry`), 11.3 (file list), 11.11 (error list), 12.5 step 9, 15.2 | **WP06's asset-metadata additions, which 15.2 requires and 11.8 has no field for.** 15.2's prerequisite says image assets *carry* colour-space and alpha metadata; the manifest record lists `kind`, `byte_length`, `importer_version`, `dependencies`, `display_name` and nothing else, so the data has no home and 15.7's "assets already marked premultiplied" refers to a mark nothing stores. Ruled (DECISIONS.md #40 ruling 2) to arrive as **manifest data recorded at import**, not re-read from headers at render time, because a renderer that decides the transfer itself can change its mind per machine and a golden stops reproducing with nothing in the project data to explain it. Consequences, in one commit: `ImageColorSpace`/`ImageAlpha`/`ImageAssetClaims` added to `anim_assets/src/image.rs` — a file 11.3 already describes as "Image metadata, color and alpha decode", so no new file — and `AssetManifestEntry.image: Option<ImageAssetClaims>` declared and encoded **last**, so every earlier field keeps its byte position and the change is a pure suffix. Two new `AssetError` variants (`MissingImageClaims`, `UnexpectedImageClaims`), each with a producing test, extending the four row 9 added for the same reason. `MANIFEST_SCHEMA_VERSION` 1→2 while `MANIFEST_DOMAIN` stays `v1`: the tag names the record *framing*, which did not change, and the version is the field inside those bytes that discriminates this content — the same split ADR-0005 Decision 4 holds for the document. Because `ProjectDocument.assets` embeds the record collection rather than re-encoding a digest (row 11, ADR-0005 Decision 11), a record change is a document change: `PROJECT_SCHEMA_VERSION` 3→4 with a real `migrate::V3_TO_V4`, a committed `project_v3.anim.json`, and `schemas/project/v4.json` from the versioned `tools/make_v4_schema.py`. `V1_TO_V2` and `V2_TO_V3` now write their literal targets, which row 15's last sentence made obligatory the moment a third step existed. **Premultiplication is deliberately not in the record**: PNG alpha is straight by the format's definition, and whether to multiply is a decode choice made against a `DecoderConfiguration`, so it is a cache-key axis rather than metadata. `Unclassified` has exactly two producers — an embedded ICC profile, reported rather than approximated, and `V3_TO_V4` — and one consumer rule: extraction refuses it. Same class of omission as rows 12, 13, 15 and 16. | 2026-11-06 |
+Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, #22–#36, #40, and the ADRs. Rows 7 and 11 are the two WP03 packages touch; row 7 is now reconciled in code and ADR-0006 carries the policy. Rows 12, 13 and 14 are WP04's; rows 15, 16, 17 and 18 are WP05's; row 19 is WP06's prerequisite. Row 11's `Easing has two variants` clause is superseded by row 12.
 
 ## Risks and open questions
 
@@ -240,7 +362,14 @@ Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, #2
    by spec 9.2, so it remains a stated residual rather than a blocker.
 5. **New, from WP00:** the dGPU enumeration order is not stable and LUIDs change
    between runs. Any future automation that selects an adapter by ordinal, or gates
-   on a recorded LUID, will intermittently target the iGPU.
+   on a recorded LUID, will intermittently target the iGPU. **Mechanism found 2026-11-06
+   (DECISIONS.md #38):** the order is stable *within* a GPU mode and flips *between* them —
+   **Standard** (hybrid) puts NVIDIA at DXGI #1, **Ultimate** at #0 — so this is not merely
+   intermittent flakiness,
+   it is a deterministic trap for anything that hard-codes an index. LUIDs moved three times in
+   three runs. Ultimate mode does **not** remove the iGPU from enumeration, so it is not a
+   mitigation for this risk. **The operator's standing mode is Standard** (DECISIONS.md #38), so
+   the NVIDIA-at-#1 / iGPU-at-#0 case is the everyday one and the retry path is expected to fire.
 6. **The gate is enforced by a hook that lives outside the repo.** `tools\ci.cmd` runs
    the three code steps and was shown to block a commit (HEAD unchanged, gate exit 1),
    installed by `tools\install-git-hooks.cmd`. But `.git/hooks` is not versioned, so
@@ -254,6 +383,10 @@ Rationale and rejected alternatives: DECISIONS.md #6, #8, #9, #10, #11–#16, #2
 8. **Nothing in DECISIONS.md #18 is enforced by code.** The adapter-identity rules
    (PCI anchor, dedicated-VRAM floor, startup assertion) are constraints on packages
    that do not exist yet. WP06 must read #18; if it doesn't, no test will notice.
+   **Sharpened 2026-11-06 by #38:** the rules are still needed now that the machine runs
+   Armoury Crate **Ultimate**, and the PCI anchor has a concrete way to get implemented wrong — taken from
+   `wgpu::AdapterInfo` it is `None` on this machine in both modes, so a hard-fail belongs on
+   the ash `VK_EXT_pci_bus_info` path.
 9. **`write_atomic` reads the payload back in full, twice** — once to prove the
    staged temporary is durable, once to prove the destination is the new state and not
    a blend. For `project.anim.json` that is noise. For WP09's export it is a

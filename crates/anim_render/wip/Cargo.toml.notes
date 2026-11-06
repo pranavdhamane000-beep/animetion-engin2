@@ -1,0 +1,61 @@
+[package]
+name = "anim_render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Spec 15.4 lists these exactly: `anim_core`, `anim_assets`, `anim_scene`, `anim_sim`,
+# `wgpu`, `bytemuck`, `half`, `glam`, `thiserror` and target-gated `windows`. The one
+# addition is `pollster`, which 15.4 does not name: `Instance::enumerate_adapters` and
+# `Adapter::request_device` are `impl Future` in wgpu 30 and every entry point the spec's
+# own signatures give for this crate (15.9 `create_renderer`, `resize`, `extract_frame`,
+# `render_scene`) is synchronous, so resolving those two futures needs an executor. It is
+# the same reason ADR-0001 added the dependency for the WP00 probes, and it is not a new
+# edge in the graph — the crate is already in the lock.
+#
+# `ash` is deliberately absent. Spec 15.4 does not list it, DECISIONS.md #38 reads as if
+# the PCI anchor needed it, and the code says otherwise: `wgpu::AdapterInfo` is populated
+# from `VK_EXT_pci_bus_info` by wgpu-hal and returns `Some("0000:01:00.0")` on this machine
+# in both GPU modes (`wp00_gpu` prints it today), while the ash path in `wp00_adapter.rs`
+# returns `None` because that probe never queries the extension. Taking the anchor from
+# `AdapterInfo` therefore implements #18's revalidation rule with no raw-Vulkan dependency
+# and no second `VkInstance`. ADR-0002 consequence 6 left that re-decision to this package.
+#
+# `windows` is target-gated per 15.4 and used for one thing: `IDXGIAdapter1::GetDesc1`'s
+# `DedicatedVideoMemory`, which is #18 decision 2's required guard. LUID correlation and the
+# memory *budget* stay WP07's (#18 decision 4, and BUILD_STATE risk 24 is still unanswered).
+[dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_scene = { path = "../anim_scene" }
+anim_sim = { path = "../anim_sim" }
+# The sixth edge 15.4's list omits, for the same reason deviation row 17(a) records for
+# `anim_sim`: 15.7 makes camera cuts a history-invalidation condition, `SceneEvent::kind`
+# is `anim_project::EventKind`, and `anim_scene` re-exports the occurrence type but not the
+# kind vocabulary it is written against. Naming the variant is the only way to count cuts,
+# and forwarding it through `anim_scene` would make that crate look like the owner of
+# authored event vocabulary, which 13 assigns to WP04's data crate. What 15.4 actually
+# prohibits — that `anim_render` never depends on `anim_export` or `anim_editor` — holds.
+anim_project = { path = "../anim_project" }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+# Spec 15.4's prohibition is on the *consumers* — `anim_export` and `anim_editor` — and
+# neither appears here. `uuid` is for the tests' typed ids: every crate in this workspace
+# derives fixture identities from the RFC 4122 DNS namespace rather than from an entropy
+# source (spec 6.3, and `uuid` is pinned v5-only for exactly that reason), and
+# `SceneSnapshot` and `SimulationFrame` have public fields, so a test builds its own
+# inputs instead of pulling in a document layer.
+uuid = { workspace = true }
+
+[lints]
+workspace = true
