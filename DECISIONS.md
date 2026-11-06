@@ -770,6 +770,218 @@ and some WP subsections ("Algorithms", "Prerequisites") are unnumbered.
 
 ---
 
+## 2026-11-06
+
+### #26 — WP02 — decoders read metadata, and no image dependency was added
+
+Spec 11.3 lists `image.rs` for "Image metadata, color and alpha decode" and `audio.rs`
+for "PCM metadata and source decoding". Spec 5.1's dependency table names `symphonia`,
+`hound`, `rubato`, `cpal`, `ringbuf` — and **no image decoder at all**. WP02 therefore
+either bought a dependency the baseline does not carry, or did not do what 11.3's
+responsibility column says. Ruled by the user 2026-11-06: **metadata only, no new
+dependency.**
+
+**What that means concretely.** `image.rs` reads PNG `IHDR` and the chunks up to the
+first `IDAT`, and JPEG marker segments up to a start-of-frame, for dimensions, bit
+depth, colour type, alpha presence and interlacing — header parsing written here, in
+roughly the same line count a `png` crate call would have cost, with no new supply
+chain. `audio.rs` reads the WAV container with `hound`, which 5.1 already pins, and
+reports rate, channels, width, frame count and whether the payload is linear at all.
+`decode.rs` carries the registry, the importer-version dispatch, the
+`DecoderConfiguration` enum and the three-axis derived-cache key in full — that half is
+not deferred.
+
+**Why the split is the right one and not a dodge.** Spec 11.12's validation list — BLAKE3
+vectors, streaming, duplicates, same-ID replacement, shuffled digests, confinement,
+corruption, truncation, missing dependencies, failure before rename — contains no pixel
+or sample check. The first consumer of decoded pixels is WP06's texture path and the
+first consumer of PCM is WP08's mix; both own a *configuration* to decode into
+(premultiplied or not, f32 or integer), which is exactly what
+`(content_hash, importer_version, decoder_configuration)` keys on. Decoding to RGBA in
+WP02 would pick that configuration a stage early and produce a buffer nothing reads for
+two stages.
+
+**Rejected:** adding `png` (a dependency exception, an ADR, and a supply-chain surface
+for a feature with no consumer yet); stubbing the two files to registry entries only
+(11.3's responsibilities would then be unmet, and WP06 would inherit undeclared work).
+
+**Consequence for WP06 and WP08:** the seam is `Decoder::read_metadata` plus
+`DecoderConfiguration`. Adding a real decode path means adding a method to that trait or
+a second trait beside it, and the cache key already has the axis the new decoder needs
+to vary on. Neither package should re-sniff the format: `ImageFormat::sniff` and
+`SampleFormat::from_spec` are the published answers.
+
+### #27 — WP02 — published BLAKE3 vectors vendored, and which column is used
+
+Spec 11.12 opens with "Verify published BLAKE3 vectors". The `blake3` crate's published
+source contains no test-vector file, so the table came from the reference
+implementation: `https://raw.githubusercontent.com/BLAKE3-team/BLAKE3/master/test_vectors/test_vectors.json`,
+fetched 2026-11-06 and vendored at
+`crates/anim_assets/tests/fixtures/blake3_test_vectors.json` (35 cases, 0 to 102 400
+bytes). The test regenerates each input from the format the file's own `_comment`
+states — a repeating 251-byte sequence `0, 1, 2, …, 250` — rather than shipping 3 MB of
+inputs.
+
+**Two things worth recording so a later session does not re-derive them.** The file's
+`hash` field is 262 hex characters: **131 bytes of extended output**, of which the first
+32 are the digest this engine stores. Asserting the whole field against a 32-byte digest
+fails, and a session that assumed the field was the digest would conclude the
+implementation is wrong. And only the unkeyed `hash` column is used, because ADR-0004
+chose a length-prefixed domain tag over `derive_key` precisely so a published digest can
+be checked by hand — the `keyed_hash` and `derive_key` columns would certify a mode this
+project does not use. `published_blake3_vectors_match_the_streaming_path` asserts the
+`key` field matches the published string, which is what tells a reader the fixture is the
+real table and not a hand-picked subset.
+
+**Consequence:** the same test runs the one-shot, the 64 KiB streaming and the
+file-on-disk path for every case, so it doubles as the proof that
+`StreamingHash::update` and `hash_file` agree with `blake3::hash`. An update to the
+upstream table is a deliberate change with no automated path; it is a vendored artifact
+and its provenance is this entry.
+
+### #28 — WP02 — anim_core gained a staged-stream API rather than anim_assets gaining a dependency
+
+Spec 11.7's import ends in a rename-without-overwrite whose destination is not knowable
+until the whole stream has been hashed, and spec 11.4 gives `anim_assets`
+`anim_core, blake3, serde, hex, thiserror`, decoder libraries and `tempfile` — **no
+`windows` crate**. `anim_core::io::atomic_replace::write_atomic` takes the payload as
+`&[u8]`, so it cannot serve a stream. Ruled by the user 2026-11-06: extend the shared
+API.
+
+**What was added, and where it lives.** Inside `crates/anim_core/src/io/atomic_replace.rs`
+— no new path, so spec 10.3's file list is unchanged — `StagedWriter::create_in` →
+`write(chunk)` → `synchronize()` → `Staged` → `publish(&Replacement)`. It reuses the
+existing exclusive-name loop (`open_unused_temporary`, extracted from `stage`), the
+existing volume guard, the existing `MoveFileExW` sequence and the existing
+`TemporaryGuard`. `write_atomic` and the streamed path now share
+`publish_staged`, which takes an `Expectation`: byte-identical for an in-memory payload,
+length-identical for a staged file. `Replacement::create_only` already existed for
+exactly this call and is what `import` uses.
+
+**One asymmetry to know about, because it looks like a hole.** In the streamed path the
+destination check after the rename compares *length*, not content — holding a
+multi-gigabyte payload to byte-compare it is the cost BUILD_STATE risk 9 names. The
+content proof is taken one step earlier instead: `import` re-reads the staged temporary
+and re-hashes it before publishing, so the bytes that are renamed are known to reproduce
+the digest, and the rename is atomic. That is two passes over a large import rather than
+three, and `store.verify` (spec 11.9) remains available when a caller wants the
+destination re-checked too. `a_staged_file_clobbered_before_publish_is_refused` is the
+test that the length check is real; it also documents what it cannot catch.
+
+**Also added:** `CanonicalBytes::fixed_bytes::<N>` in `anim_core::hash`, and `uuid()` now
+delegates to it. ADR-0004's rule "a width fixed by the type is not length-prefixed" had
+no method to express it, and `ContentHash` needed it (ADR-0005 Decision 3).
+
+**Rejected:** `anim_assets` depending on `windows` (spec 5.1's rule for that crate is
+"target-gated features, no cross-platform API leakage", and `io::windows` is `pub(crate)`
+by that decision); buffering the payload (fails 11.12's streaming test outright); a
+`WP02-local` rename implementation, which is the duplication DECISIONS.md #12 was written
+to prevent.
+
+**Residual:** this modifies a package whose gate was certified yesterday. WP01's 83 tests
+were run unchanged and still pass, and the refactor is behaviour-preserving for
+`write_atomic`, but the rule in `AGENTS.md` — read the code and its tests first, run
+`git log` on the path — is what made that edit safe rather than lucky.
+
+### #29 — WP02 — four error additions, one privacy resolution, and how cancellation is signalled
+
+**Taxonomy.** Spec 11.11 names ten categories; all ten are present
+(`crates/anim_assets/src/lib.rs`, where 11.3 lists no `error.rs`, so `AssetError` lives
+at the crate root rather than adding a path). Four were added because the spec requires
+the rejection but the list has no row for it: `DuplicateDependency` (11.7 "duplicate
+dependencies are rejected" — `DuplicateAssetId` was *not* reused, because the two ids
+name different objects and a diagnostic that blames the wrong one sends the reader to the
+wrong record), `MalformedAsset` (a stored object whose bytes do not match its declared
+kind), `MalformedManifest` (a manifest that describes itself inconsistently — a record
+filed under another id's key, or a domain tag that will not encode), and `SizeOverflow`
+(11.7's "checked byte count"). The precedent for stating additions rather than inventing
+rows is `anim_core::error`, which added `MalformedCanonical` and `NonFiniteValue` past
+10.11's six.
+
+**`dependencies` is private.** Spec 11.8 lists `pub dependencies: Vec<AssetId>` and
+spec 10.8 says "fields whose invariants require normalization are private". DECISIONS.md
+#22 settled that conflict for `FramePos::subframe` on the grounds that the rule names the
+same thing the normalization does; the same reading applies here, because 11.7's sort and
+deduplicate rule is a normalization. `AssetManifestEntry::new` validates, the field is
+private with a `dependencies()` accessor, and `Deserialize` is hand-written so a
+`project.anim.json` cannot smuggle an unsorted list in from disk — the failure mode #22
+named. `records` in `AssetManifest` is private for the adjacent reason: the map key and
+the record's own id must not be allowed to disagree.
+
+**Cancellation has no parameter, so it has a contract.** Spec 11.9's `import` takes
+`source: R` and nothing else, yet 11.11 requires a `Cancelled` outcome. It is produced
+when the reader returns `std::io::ErrorKind::Interrupted`, which is how WP10's UI-driven
+import will stop one. Note the deliberate asymmetry with `hash_stream`, which *retries*
+that error kind as std requires: re-reading bytes already decided upon may resume, but a
+stream the operator stopped must not. `Cancelled` is a **warning**, not an error — an
+operator who cancelled an import did something supported, and calling it a fault teaches
+them to ignore diagnostics.
+
+**One addition to a spec-listed struct.** Spec 11.8 gives
+`ResolvedAsset { entry, canonical_path }`; the implemented type carries a third field,
+`policy: ResolutionPolicy`, because "resolved" is not one claim. A `ResolvedAsset` under
+`Presence` says the file exists; under `Content` it says the bytes were read and hashed.
+Dropping the field would make a preview's cheap resolution indistinguishable from
+export's verification pass in a report, which is the asymmetry 11.7 exists to draw.
+
+**Object-store temporaries are named `.import.<n>.tmp` inside `assets/objects/`.** Same
+bounded-counter sequence as deviation 7 (no entropy source, so spec 12.7's `.<uuid>.tmp`
+remains unsatisfiable), and deliberately in the objects directory so the rename is
+same-volume. What makes 11.8's "temporary files are never resolved as objects" structural
+rather than a convention is `AssetStore::parse_object_name`, which accepts only a
+validated 64-hex-character digest: no temporary name can pass it, and the resolver only
+ever reaches paths derived from a record's `ContentHash`.
+
+### #30 — WP02 — result summary, and the half of G2 this package cannot claim
+
+`tools\ci.cmd` green 2026-11-06: fmt, clippy `--workspace --all-targets -D warnings`,
+`test --workspace --locked`. The workspace suite is **188 tests**: `anim_assets` 91 (72
+unit plus 19 in `tests/store.rs`), `anim_core` 83 (55 unit plus 28 in
+`tests/time_properties.rs` — 7 added for the staged path and `fixed_bytes`),
+`anim_test_support` 14 unchanged. Probes were not re-run: adapter, driver, toolchain and
+pinned FFmpeg are unchanged.
+
+**G2 is WP02+WP03 together** (spec 8.3, DECISIONS.md #7). What this package can state is
+that **WP02's own validation section passes**: every clause of 11.12 has a named test,
+listed in the `BUILD_STATE.md` row. What it cannot state is "G2 passed", because
+11.5 step 8 — connecting record insertion to WP03 commands — and 8.3's other three
+clauses (atomic commands, save faults, migrations) have no code yet. That is the joint
+gate working as designed, not a gap in this package.
+
+**Five defects, all found by the tests rather than by review, and what each one means.**
+
+1. `image.rs` checked `header[3]`/`header[4]` for PNG's compression and filter methods.
+   Those bytes are the low order of the width and the height. A 256-pixel-wide image was
+   refused as "unknown compression method"; the offsets are 10 and 11. Eight fixtures
+   failed at once, which is what made it obvious rather than mysterious.
+2. `dependency_closure` returned the traversal *stack*, which `visit` empties as it
+   unwinds — so every closure came back empty and the test that asserted four assets
+   asserted an order nobody had checked. The set is returned now.
+3. `AssetManifest::insert` was first written to refuse a replacement whose content hash
+   differed. That is spec 11.6's *normal* reimport path, so the first correct use of the
+   API would have failed. `insert` replaces; `from_records` is where two records for one
+   id is a defect worth reporting.
+4. The JPEG fixtures declared segment length 6 where the payload is 6 bytes and the
+   length field counts itself, so every start-of-frame parsed as truncated. Fixed in the
+   fixture, with the framing arithmetic written down so it is not re-derived by hand.
+5. `assert_no_stray_objects` was called on a scenario where a staged temporary *should*
+   exist, and it failed correctly. The assertion now checks what 11.8 actually requires
+   there — that the temporary is not resolvable as an object — and that it is gone after
+   the abandonment.
+
+**Carried forward, not hidden.** `AssetStore::derived_path` has no consumer in this build,
+so it is exercised only by its own tests; WP06 is where a real cache is written and
+where the key's third axis gets proven. `payload_too_short` for a JPEG and the
+`hound` `Unsupported` mapping are typed-error paths with no fixture, because no
+compressed-codec WAV or partial-frame JPEG was worth hand-building this package; WP11's
+fault-injection pass is where the exotic inputs live. The import path does two read
+passes over every asset (source→temp, temp→digest) plus the rename, and WP09's big-export
+verification should read that as the budget, not as a bug to fix in passing.
+
+
+
+---
+
 ## Test command
 
 **Use the gate. `tools\ci.cmd` is the single entry point** (DECISIONS.md #19) and it

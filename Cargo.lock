@@ -24,6 +24,17 @@ version = "0.0.0"
 [[package]]
 name = "anim_assets"
 version = "0.0.0"
+dependencies = [
+ "anim_core",
+ "blake3",
+ "hex",
+ "hound",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "anim_audio"

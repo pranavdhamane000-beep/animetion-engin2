@@ -156,7 +156,21 @@ impl CanonicalBytes {
     /// Sixteen raw bytes, not length-prefixed: the width is fixed by the type, so a
     /// prefix would only let a malformed length disagree with it.
     pub fn uuid(&mut self, value: &Uuid) {
-        self.0.extend_from_slice(value.as_bytes());
+        self.fixed_bytes(value.as_bytes());
+    }
+
+    /// A fixed-width byte string, written raw.
+    ///
+    /// The rule is the one [`CanonicalBytes::uuid`] states: where the width is part
+    /// of the type, a length prefix adds nothing to delimit but gives a second,
+    /// disagreeable copy of the width. This is why a content digest hashes as its
+    /// thirty-two bytes rather than as sixty-four hex characters in a canonical
+    /// stream — the text form is for reports and file names, and the byte form is
+    /// what a digest is computed over. (Added for WP02's manifest records, which
+    /// ADR-0004 Decision 4's raw-fixed-width rule covers but whose type did not exist
+    /// when this module was written.)
+    pub fn fixed_bytes<const N: usize>(&mut self, value: &[u8; N]) {
+        self.0.extend_from_slice(value);
     }
 
     /// BLAKE3 over the stream.
@@ -291,6 +305,29 @@ mod tests {
         let mut c = CanonicalBytes::new();
         c.rational(&rate(30_000, 1001));
         assert_ne!(a.as_slice(), c.as_slice());
+    }
+
+    #[test]
+    fn fixed_width_values_are_written_raw_and_delimit_by_their_type() {
+        // The rule ADR-0004 states for UUIDs, applied to the 32-byte content digest
+        // WP02 hashes into every manifest record: no length prefix, because the width
+        // is part of the type and a prefix would be a second copy that can disagree.
+        let digest = [0xA5u8; 32];
+        let mut cp = CanonicalBytes::new();
+        cp.fixed_bytes(&digest);
+        assert_eq!(cp.len(), 32);
+        assert_eq!(cp.as_slice(), digest);
+
+        let mut with_prefix = CanonicalBytes::new();
+        with_prefix.bytes(&digest);
+        assert_eq!(with_prefix.len(), 40, "8 prefix bytes + 32");
+        assert_ne!(cp.digest(), with_prefix.digest());
+
+        // Width is part of the identity: a 16-byte and a 32-byte field of the same
+        // repeating byte cannot encode alike.
+        let mut short = CanonicalBytes::new();
+        short.fixed_bytes(&[0xA5u8; 16]);
+        assert_ne!(short.digest(), cp.digest());
     }
 
     #[test]
