@@ -186,7 +186,8 @@ impl CommandKind {
     /// `inverse()` of `inverse()` is not required to return to the start — an
     /// `UpsertAsset` that displaced nothing reverses to `RemoveAsset`, and removing an
     /// absent record is refused rather than being a no-op — but every command's inverse
-    /// must land inside this set, which `closed_set_is_the_inverse_of_itself` asserts.
+    /// must land inside this set, which `every_command_inverses_into_a_command_of_the_same_set`
+    /// asserts.
     #[must_use]
     pub const fn inverse(self) -> Self {
         match self {

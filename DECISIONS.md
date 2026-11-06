@@ -1167,6 +1167,18 @@ rather than by review.**
    but must **not** erase the memory that an id was accepted, or a retried batch after an undo
    would apply twice. The test was corrected to assert both halves.
 
+**Carried forward, not hidden.** Four public helpers I added to `anim_commands` in this
+package had no caller — `CommandEnvelope::check_form`, `envelope::current_payload_version`,
+`Registry::payload_schemas` and `Handler::schema` — and were removed the same day in a
+follow-up commit after he asked what had gone wrong. `AGENTS.md` and the system rules both
+say not to build for a hypothetical caller, and BUILD_STATE risk 16 makes the same point
+about unexercised capability: an accessor nobody calls is surface that has to be kept
+correct forever and proven by nothing. One doc citation in the removed set pointed at a test
+name that does not exist (`closed_set_is_the_inverse_of_itself`), corrected to the real one.
+Audited afterwards by script: every backticked identifier in a WP03 doc comment resolves to
+something defined in the workspace — the same class of error #25's citation audit found
+eleven of.
+
 **Carried forward, not hidden.** The command set will grow, and 12.12's
 "rollback from every command index" will need re-running over the new kinds rather than
 trusting this package's fixture batch; `every_command_kind_has_an_inverse_that_closes` is the

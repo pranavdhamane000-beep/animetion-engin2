@@ -288,21 +288,6 @@ impl Handler {
     pub const fn version(&self) -> u32 {
         self.version
     }
-
-    /// What this kind's payload is declared to hold, looked up in the one table.
-    ///
-    /// A lookup rather than a stored reference because `PAYLOAD_SCHEMAS` and `Command`
-    /// are two declarations of the same set, and a handler that carried a pointer into the
-    /// table would make an undeclared kind a construction failure at runtime. The
-    /// `every_kind_has_exactly_one_declaration_at_the_current_version` test is what makes
-    /// the answer never `None` in practice, and `field_names` returning an empty list is
-    /// what keeps it honest if that ever stops being true.
-    #[must_use]
-    pub fn schema(&self) -> Option<&'static PayloadSchema> {
-        PAYLOAD_SCHEMAS
-            .iter()
-            .find(|schema| schema.kind == self.kind && schema.version == self.version)
-    }
 }
 
 /// A registry that does not exist: an out-of-range payload version reports the pair it
@@ -436,12 +421,6 @@ impl Registry {
     /// A `serde_json` failure, reported as a validation error naming the kind.
     pub fn encode(&self, command: &Command) -> Result<WireCommand> {
         encode_command(command)
-    }
-
-    /// The payload schemas this registry can dispatch, for `schemas/commands/`.
-    #[must_use]
-    pub fn payload_schemas(&self) -> Vec<&'static PayloadSchema> {
-        self.handlers.values().filter_map(Handler::schema).collect()
     }
 }
 

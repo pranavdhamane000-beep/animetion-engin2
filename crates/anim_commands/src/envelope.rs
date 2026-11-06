@@ -14,7 +14,7 @@ use anim_project::Revision;
 use serde::{Deserialize, Serialize};
 
 use crate::command::Command;
-use crate::registry::{decode_wire_command, encode_command, WireCommand, PAYLOAD_SCHEMA_VERSION};
+use crate::registry::{decode_wire_command, encode_command, WireCommand};
 use crate::{CommandError, Result};
 
 /// The envelope schema version this build writes and accepts.
@@ -107,16 +107,6 @@ impl CommandEnvelope {
             });
         }
         Ok(())
-    }
-
-    /// Both shape checks, for a caller that has no ordering to honour.
-    ///
-    /// # Errors
-    ///
-    /// As [`CommandEnvelope::check_schema`] then [`CommandEnvelope::check_batch_is_nonempty`].
-    pub fn check_form(&self) -> Result<()> {
-        self.check_schema()?;
-        self.check_batch_is_nonempty()
     }
 
     /// The full canonical byte stream the batch hash is taken over.
@@ -227,12 +217,4 @@ impl<'de> Deserialize<'de> for CommandEnvelope {
             commands,
         })
     }
-}
-
-/// The version every payload in a freshly built envelope declares.
-///
-/// Re-exported for callers that assemble a [`WireCommand`] by hand, so the number is not
-/// written as a literal outside the registry's table.
-pub const fn current_payload_version() -> u32 {
-    PAYLOAD_SCHEMA_VERSION
 }
