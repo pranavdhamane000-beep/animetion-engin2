@@ -30,6 +30,26 @@ and those two disagree, they win and these files are wrong.
 `resources.rs`, `readback.rs`, the five pass modules, all five `.wgsl` files, `tests/golden.rs`,
 ADR-0010, ADR-0011. Spec 15.3 lists eighteen files; three and a half existed.
 
+## How to un-park, and what to expect
+
+`git mv` the six files back into `src/`, restore the `pub mod` lines from `wip/lib.rs`, and take
+the dependency block from `wip/Cargo.toml.notes` rather than re-deriving it — that file is spec
+15.4 plus the two additions #40 records (`pollster` for wgpu 30's `impl Future` entry points, and
+`anim_project` for `EventKind`, which 15.4 omits for the same reason deviation row 17(a) records
+for `anim_sim`).
+
+Two expectations worth setting before the first build, because neither is guessable from the files:
+
+- **The error count is unknown, and it is not small.** The only `cargo check` ever run against
+  these files died inside `anim_assets` — the schema work was mid-edit — so `anim_render`'s own
+  errors were only partly surfaced. What came back before that was ~9 errors across `targets.rs`
+  and `lib.rs` and it was never re-run to zero afterwards. `graph.rs` alone calls five pass-module
+  functions that no module declares. Budget for a real compile-fix cycle, not for deleting a `mod`
+  line and continuing.
+- **`cargo fmt` never touched these files.** They were outside cargo's view the whole time, so
+  their whitespace is whatever the editor produced. Run `cargo fmt` immediately after un-parking,
+  as its own step, so the formatting diff does not land inside the review diff of the real changes.
+
 ## The one design question these files did not answer
 
 `extract_frame`'s 15.9 signature receives a `SceneSnapshot` and a `SimulationFrame`, but the alpha
