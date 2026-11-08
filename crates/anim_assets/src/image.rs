@@ -1,17 +1,23 @@
 //! Image metadata, color and alpha decode (spec 11.3, 11.6).
 //!
-//! Reads the header, not the pixels. The facts a scene needs before it can reference
-//! a cel are its dimensions, its bit depth, whether it carries alpha and whether it is
-//! interlaced — all of which live in the first few hundred bytes, and none of which
-//! require a rasterizer. Spec 5.1's dependency table names no image decoder, and
-//! DECISIONS.md #26 records the ruling that pixel decode arrives with its consumer in
-//! WP06 rather than as a dependency bought a stage early.
+//! Two readers live here. The metadata pass reads the header, not the pixels: the facts a
+//! scene needs before it can reference a cel are its dimensions, its bit depth, whether it
+//! carries alpha and whether it is interlaced — all of which live in the first few hundred
+//! bytes, and none of which require a rasterizer. The pixel pass ([`ImageDecoder::decode_pixels`])
+//! is the consumer DECISIONS.md #26 deferred until WP06 and #41 ruling 2 placed here: it
+//! decodes PNG via the pinned `png` crate and JPEG via the pinned `zune-jpeg` crate, applies
+//! the transfer function the *record* claims, and premultiplies in linear space when the
+//! [`crate::decode::DecoderConfiguration`] asks for it. The result is a derived, cacheable
+//! value (spec 11.10), never authoritative — the manifest record stays the one source of
+//! colour truth.
 //!
-//! Chunk CRCs are *not* verified. This engine's integrity model is the content digest
-//! (spec 11.6), which proves the stored object is byte-for-byte what was imported;
-//! PNG's per-chunk CRC would catch corruption introduced by the authoring tool before
-//! import, which is a different failure with a different owner, and paying a second
-//! full pass over every image to cover it is the wrong trade.
+//! Chunk CRCs are *not* verified by the metadata pass. This engine's integrity model is the
+//! content digest (spec 11.6), which proves the stored object is byte-for-byte what was
+//! imported; PNG's per-chunk CRC would catch corruption introduced by the authoring tool
+//! before import, which is a different failure with a different owner, and paying a second
+//! full pass over every image to cover it is the wrong trade. (The `png` crate's pixel
+//! decoder verifies critical-chunk CRCs itself; that is the library's own integrity check on
+//! the bytes it inflates, not a second metadata reading.)
 //!
 //! Colour and alpha are classified here, from the same single header pass, and the
 //! result is what [`crate::import`] records in the manifest. Spec 15.2 makes "image
@@ -24,14 +30,14 @@
 //! model is a report rather than a guess.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::Path;
 
 use anim_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 use serde::{Deserialize, Serialize};
 
-use crate::decode::{AssetMetadata, Decoder, CURRENT_IMPORTER_VERSION};
-use crate::manifest::AssetKind;
+use crate::decode::{AssetMetadata, Decoder, DecoderConfiguration, CURRENT_IMPORTER_VERSION};
+use crate::manifest::{AssetKind, AssetManifestEntry};
 use crate::AssetError;
 
 /// The largest chunk or segment this crate will read or skip while looking for a
@@ -721,12 +727,333 @@ fn describe(chunk_type: &[u8; 4]) -> String {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ImageDecoder;
 
+/// One decoded image, in the linear working space WP06 samples from.
+///
+/// `pixels` is row-major with exactly `width * height` entries, four components per pixel.
+/// The components are **linear** (the record's transfer function has been applied, never an
+/// sRGB-encoded value) and are `f32`, not clamped to eight bits: the `Rgba8` in a
+/// [`DecoderConfiguration`] name describes the *source* bit depth the configuration was
+/// written against, not the width of this output. Alpha is straight unless the configuration
+/// asked for premultiplication, in which case it has already been multiplied into the colour
+/// channels in linear space (spec 15.7). This is a derived value (spec 11.10): cacheable by
+/// `(content_hash, importer_version, configuration)`, never authoritative.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major, 4 components per pixel, **linear** (not sRGB-encoded), not clamped to 8 bits.
+    pub pixels: Vec<[f32; 4]>,
+}
+
+/// The allocation ceiling the pixel pass mirrors from the pinned `png` crate's own default
+/// [`png::Limits`] (64 MiB). A crafted header can declare dimensions whose raw frame would
+/// exhaust memory; bounding the output buffer here turns that into a typed refusal rather
+/// than an allocation failure, and matches the budget the decoder already enforces internally.
+const MAX_DECODE_BYTES: usize = 64 * 1024 * 1024;
+
 impl ImageDecoder {
     /// The formats with a header reader in this build.
     #[must_use]
     pub const fn supported_formats() -> &'static [ImageFormat] {
         &[ImageFormat::Png, ImageFormat::Jpeg]
     }
+
+    /// Decode one stored image's pixels into the linear working space (spec 11.3, 15.7).
+    ///
+    /// The transfer function comes from `record.image`, never from a guess: an `Srgb` claim
+    /// applies the exact sRGB EOTF to RGB, a `Linear` claim passes the samples through, and an
+    /// `Unclassified` claim on either axis is refused with [`AssetError::UnclassifiedImageClaims`]
+    /// naming the asset and the remedy (spec 15.11's prohibition on a silent fallback). Alpha
+    /// is never transferred. `ImageAlpha::Opaque` forces alpha to 1.0 regardless of what the
+    /// file carries; `Straight` uses the file's alpha; `Unclassified` is refused.
+    ///
+    /// Premultiplication is the configuration's job and happens in **linear** space, after the
+    /// transfer: `Rgba8Premultiplied` multiplies colour by alpha (spec 15.7's
+    /// `rgb_premul = rgb_linear * alpha`), `Rgba8Unpremultiplied` leaves alpha straight. The
+    /// `Rgba8` spelling names the eight-bit *source*, not this `f32` output; the variants are
+    /// not renamed because their `as_str()` spellings feed [`crate::decode::derived_key`] and a
+    /// rename would move every cache key for no behavioural change.
+    ///
+    /// Interlaced (Adam7) PNGs are decoded, not refused — the `png` crate expands the passes
+    /// itself. Paletted, grayscale, grayscale+alpha, RGB and RGBA PNGs all expand to four
+    /// components through the crate's transformation API; 16-bit sources are reduced to eight
+    /// bits by the crate's `STRIP_16` transform *before* the transfer, so that reduction is
+    /// lossy and is documented rather than passed off as lossless. JPEG has no alpha channel,
+    /// so its alpha is 1.0. Malformed or truncated bytes produce [`AssetError::MalformedAsset`],
+    /// never a panic.
+    ///
+    /// # Errors
+    ///
+    /// [`AssetError::IncompatibleDecodeConfiguration`] if `configuration` is not an image
+    /// target, [`AssetError::MissingImageClaims`] if the record carries no claims,
+    /// [`AssetError::UnclassifiedImageClaims`] if either claim is `Unclassified`,
+    /// [`AssetError::UnsupportedDecoder`] if the object's signature has no reader,
+    /// [`AssetError::Io`] if the object cannot be read, and [`AssetError::MalformedAsset`] if
+    /// the bytes do not decode.
+    pub fn decode_pixels(
+        &self,
+        record: &AssetManifestEntry,
+        path: &Path,
+        configuration: DecoderConfiguration,
+    ) -> Result<DecodedImage, AssetError> {
+        let asset_id = record.asset_id.to_canonical_string();
+
+        // The configuration selects premultiplication; the audio PCM target is not an image
+        // decode and is refused rather than silently treated as one of the RGBA targets.
+        let premultiply = match configuration {
+            DecoderConfiguration::Rgba8Unpremultiplied => false,
+            DecoderConfiguration::Rgba8Premultiplied => true,
+            DecoderConfiguration::PcmF32Interleaved => {
+                return Err(AssetError::IncompatibleDecodeConfiguration {
+                    asset_id,
+                    kind: record.kind.to_string(),
+                    configuration: configuration.as_str().to_owned(),
+                });
+            }
+        };
+
+        // The transfer and alpha mode are the record's claims, read here and nowhere else.
+        // A valid `Image` record always carries claims (the constructor enforces it), so the
+        // `None` branch is the defensive refusal for a record that is not an image at all.
+        let claims = record.image.ok_or_else(|| AssetError::MissingImageClaims {
+            asset_id: asset_id.clone(),
+        })?;
+        if claims.color_space == ImageColorSpace::Unclassified {
+            return Err(AssetError::UnclassifiedImageClaims {
+                asset_id,
+                axis: "color_space".to_owned(),
+            });
+        }
+        if claims.alpha == ImageAlpha::Unclassified {
+            return Err(AssetError::UnclassifiedImageClaims {
+                asset_id,
+                axis: "alpha".to_owned(),
+            });
+        }
+        let srgb = claims.color_space == ImageColorSpace::Srgb;
+        let force_opaque = claims.alpha == ImageAlpha::Opaque;
+
+        // Sniff the format from the signature, then rewind so the format decoder sees the
+        // object from byte zero. The PNG decoder streams from the `BufRead + Seek` source;
+        // the JPEG decoder, pinned without its `std` adapter, reads an in-memory cursor.
+        let file =
+            File::open(path).map_err(|e| crate::io_error("open image", path, e.to_string()))?;
+        let mut reader = BufReader::new(file);
+        let mut probe = [0u8; 8];
+        let probed = reader
+            .read(&mut probe)
+            .map_err(|e| crate::io_error("read image header", path, e.to_string()))?;
+        let Some(format) = ImageFormat::sniff(&probe[..probed]) else {
+            return Err(AssetError::UnsupportedDecoder {
+                kind: AssetKind::Image.to_string(),
+                importer_version: CURRENT_IMPORTER_VERSION,
+            });
+        };
+        reader
+            .rewind()
+            .map_err(|e| crate::io_error("rewind image", path, e.to_string()))?;
+
+        match format {
+            ImageFormat::Png => {
+                decode_png(reader, &asset_id, path, srgb, force_opaque, premultiply)
+            }
+            ImageFormat::Jpeg => {
+                // `zune-jpeg` is pinned with `default-features = false`, so its `std` reader
+                // adapter is absent and it decodes from an in-memory cursor rather than a
+                // `BufRead` stream. The compressed object is read whole for this path only.
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| crate::io_error("read image", path, e.to_string()))?;
+                decode_jpeg(&bytes, &asset_id, path, srgb, force_opaque, premultiply)
+            }
+        }
+    }
+}
+
+/// The exact sRGB EOTF (IEC 61966-2-1), applied to a normalized encoded sample.
+///
+/// The piecewise is the specification's own: a linear segment below 0.04045 and the 2.4-power
+/// segment above it. This is the only transfer this engine applies, and it is applied solely
+/// because a record claims `Srgb` — never as a fallback for an unclassified asset.
+fn srgb_eotf(encoded: f32) -> f32 {
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Turn one eight-bit source pixel into the linear, optionally premultiplied output.
+///
+/// The order is load-bearing and is the whole of spec 15.7's colour rule: normalize, apply the
+/// transfer to RGB (alpha is never transferred), resolve alpha from the claim, then — only if
+/// the configuration asked — multiply colour by alpha in linear space. Premultiplying before
+/// the transfer would multiply encoded values and give a different, wrong result.
+fn finish_pixel(
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+    srgb: bool,
+    force_opaque: bool,
+    premultiply: bool,
+) -> [f32; 4] {
+    let alpha = if force_opaque {
+        1.0
+    } else {
+        f32::from(a) / 255.0
+    };
+    let mut rgb = [
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+    ];
+    if srgb {
+        for channel in &mut rgb {
+            *channel = srgb_eotf(*channel);
+        }
+    }
+    if premultiply {
+        for channel in &mut rgb {
+            *channel *= alpha;
+        }
+    }
+    [rgb[0], rgb[1], rgb[2], alpha]
+}
+
+/// A pixel-decode failure, named with the asset, the format and the object path.
+fn decode_malformed(
+    asset_id: &str,
+    format: ImageFormat,
+    path: &Path,
+    detail: impl Into<String>,
+) -> AssetError {
+    AssetError::MalformedAsset {
+        asset_id: asset_id.to_owned(),
+        kind: AssetKind::Image.to_string(),
+        detail: format!("{format} at {}: {}", path.display(), detail.into()),
+    }
+}
+
+/// Decode a PNG through the pinned `png` crate, expanding every layout to four components.
+///
+/// `EXPAND | ALPHA | STRIP_16` is the crate's own expansion path: paletted images become RGBA
+/// (palette and `tRNS` alpha resolved by the crate, not hand-rolled), grayscale and RGB gain an
+/// alpha channel, sub-8-bit samples widen to eight, and 16-bit samples strip to eight. The
+/// strip happens before [`finish_pixel`] applies the transfer, so a 16-bit source is reduced
+/// to eight bits lossily — documented at the entry point rather than hidden. After the
+/// transform the output is either `GrayscaleAlpha` (two samples) or `Rgba` (four); both map to
+/// four linear components here. Adam7 interlacing is expanded by `next_frame` itself.
+fn decode_png<R: BufRead + Seek>(
+    source: R,
+    asset_id: &str,
+    path: &Path,
+    srgb: bool,
+    force_opaque: bool,
+    premultiply: bool,
+) -> Result<DecodedImage, AssetError> {
+    let malformed = |detail: String| decode_malformed(asset_id, ImageFormat::Png, path, detail);
+
+    let mut decoder = png::Decoder::new(source);
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::ALPHA | png::Transformations::STRIP_16,
+    );
+    let mut reader = decoder.read_info().map_err(|e| malformed(e.to_string()))?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| malformed("image dimensions do not fit a decode buffer".to_owned()))?;
+    if size > MAX_DECODE_BYTES {
+        return Err(malformed(format!(
+            "decoded frame is {size} bytes, above the {MAX_DECODE_BYTES} byte decode budget"
+        )));
+    }
+    let mut buf = vec![0u8; size];
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|e| malformed(e.to_string()))?;
+
+    let width = frame.width;
+    let height = frame.height;
+    let pixels = match frame.color_type {
+        png::ColorType::Rgba => buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| finish_pixel(c[0], c[1], c[2], c[3], srgb, force_opaque, premultiply))
+            .collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| finish_pixel(c[0], c[0], c[0], c[1], srgb, force_opaque, premultiply))
+            .collect(),
+        _ => {
+            return Err(malformed(
+                "unexpected decoded PNG colour type after expansion".to_owned(),
+            ));
+        }
+    };
+    Ok(DecodedImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Decode a JPEG through the pinned `zune-jpeg` crate into RGB, then to four linear components.
+///
+/// The crate's default output colour space is RGB: YCbCr converts, grayscale luma replicates
+/// across the three channels, and the result is three eight-bit samples per pixel. JPEG carries
+/// no alpha channel in any form, so alpha is 1.0 before the claim resolves it (and `Opaque`
+/// forces the same 1.0). Headers are decoded first so the output size is checked before it is
+/// allocated, and the crate's own dimension limits turn an oversized header into a typed error.
+fn decode_jpeg(
+    source: &[u8],
+    asset_id: &str,
+    path: &Path,
+    srgb: bool,
+    force_opaque: bool,
+    premultiply: bool,
+) -> Result<DecodedImage, AssetError> {
+    let malformed = |detail: String| decode_malformed(asset_id, ImageFormat::Jpeg, path, detail);
+
+    let cursor = zune_jpeg::zune_core::bytestream::ZCursor::new(source);
+    let mut decoder = zune_jpeg::JpegDecoder::new(cursor);
+    decoder
+        .decode_headers()
+        .map_err(|e| malformed(e.to_string()))?;
+    let size = decoder
+        .output_buffer_size()
+        .ok_or_else(|| malformed("image dimensions do not fit a decode buffer".to_owned()))?;
+    let mut rgb = vec![0u8; size];
+    decoder
+        .decode_into(&mut rgb)
+        .map_err(|e| malformed(e.to_string()))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| malformed("jpeg decoder reported no image info".to_owned()))?;
+    let width = u32::from(info.width);
+    let height = u32::from(info.height);
+    let count = width as usize * height as usize;
+    if rgb.len() != count * 3 {
+        return Err(malformed(format!(
+            "decoded {} bytes, expected {} for a {width}x{height} RGB frame",
+            rgb.len(),
+            count * 3
+        )));
+    }
+    let pixels = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| finish_pixel(c[0], c[1], c[2], 255, srgb, force_opaque, premultiply))
+        .collect();
+    Ok(DecodedImage {
+        width,
+        height,
+        pixels,
+    })
 }
 
 impl Decoder for ImageDecoder {
@@ -748,7 +1075,10 @@ mod tests {
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
-        reason = "test assertions only; the production rule is enforced at the workspace level"
+        clippy::excessive_precision,
+        reason = "test assertions only; the production rule is enforced at the workspace level. \
+                  The float literals are independent f64-computed specification oracles compared \
+                  against f32 output with a tolerance, so their full precision is deliberate."
     )]
 
     use super::*;
@@ -1364,5 +1694,457 @@ mod tests {
         .unwrap_err();
         assert!(matches!(e, AssetError::MalformedAsset { .. }), "{e}");
         assert!(e.to_string().contains("iCCP"), "{e}");
+    }
+
+    // ---- pixel decode (WP06, DECISIONS.md #41 ruling 2) ----
+
+    use crate::hash::ContentHash;
+    use anim_core::id::AssetId;
+    use uuid::Uuid;
+
+    /// A record carrying exactly the claims under test, so the decode reads its transfer and
+    /// alpha mode from the manifest the way the renderer will — never from the file.
+    fn decode_record(claims: ImageAssetClaims) -> AssetManifestEntry {
+        let namespace = Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap();
+        AssetManifestEntry::new(
+            AssetId::derive(&namespace, b"decode-test"),
+            ContentHash::from_bytes([0x11; 32]),
+            0,
+            AssetKind::Image,
+            CURRENT_IMPORTER_VERSION,
+            [],
+            "cel",
+            Some(claims),
+        )
+        .unwrap()
+    }
+
+    fn claims(color_space: ImageColorSpace, alpha: ImageAlpha) -> ImageAssetClaims {
+        ImageAssetClaims { color_space, alpha }
+    }
+
+    /// Encode a real, decodable PNG with the pinned crate's own encoder.
+    fn encode_png(
+        width: u32,
+        height: u32,
+        color: png::ColorType,
+        depth: png::BitDepth,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, width, height);
+            encoder.set_color(color);
+            encoder.set_depth(depth);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(data).unwrap();
+        }
+        out
+    }
+
+    fn encode_indexed_png(palette: &[u8], indices: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 1, 1);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(palette.to_vec());
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(indices).unwrap();
+        }
+        out
+    }
+
+    fn decode(
+        dir: &tempfile::TempDir,
+        name: &str,
+        bytes: &[u8],
+        claims: ImageAssetClaims,
+        configuration: DecoderConfiguration,
+    ) -> Result<DecodedImage, AssetError> {
+        let path = write(dir, name, bytes);
+        ImageDecoder.decode_pixels(&decode_record(claims), &path, configuration)
+    }
+
+    fn close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn srgb_eotf_matches_the_specification_at_known_points() {
+        // The piecewise is the spec's own; these literals are computed from it independently
+        // of `srgb_eotf`, never by calling it another way.
+        assert_eq!(srgb_eotf(0.0), 0.0);
+        assert_eq!(srgb_eotf(1.0), 1.0);
+        close(srgb_eotf(0.5), 0.21404114);
+        // The linear segment's endpoint: 0.04045 / 12.92.
+        close(srgb_eotf(0.04045), 0.003130805);
+    }
+
+    #[test]
+    fn a_linear_claim_passes_mid_grey_through_where_an_srgb_claim_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = encode_png(
+            1,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            &[128],
+        );
+        let linear = decode(
+            &dir,
+            "grey.png",
+            &bytes,
+            claims(ImageColorSpace::Linear, ImageAlpha::Opaque),
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        // 128 / 255, unchanged: the authored sample normalized, no transfer.
+        close(linear.pixels[0][0], 0.50196078);
+        close(linear.pixels[0][1], 0.50196078);
+        close(linear.pixels[0][2], 0.50196078);
+
+        let srgb = decode(
+            &dir,
+            "grey.png",
+            &bytes,
+            claims(ImageColorSpace::Srgb, ImageAlpha::Opaque),
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        // ((128/255 + 0.055) / 1.055)^2.4, the sRGB EOTF at the same sample.
+        close(srgb.pixels[0][0], 0.21586050);
+        assert!(
+            (linear.pixels[0][0] - srgb.pixels[0][0]).abs() > 0.2,
+            "the two claims must diverge, or the transfer is hardcoded"
+        );
+    }
+
+    #[test]
+    fn unclassified_colour_and_alpha_each_refuse_and_name_the_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = encode_png(
+            1,
+            1,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &[10, 20, 30, 40],
+        );
+        for (claims, axis) in [
+            (
+                claims(ImageColorSpace::Unclassified, ImageAlpha::Straight),
+                "color_space",
+            ),
+            (
+                claims(ImageColorSpace::Srgb, ImageAlpha::Unclassified),
+                "alpha",
+            ),
+        ] {
+            let record = decode_record(claims);
+            let id = record.asset_id.to_canonical_string();
+            let path = write(&dir, "u.png", &bytes);
+            let e = ImageDecoder
+                .decode_pixels(&record, &path, DecoderConfiguration::Rgba8Unpremultiplied)
+                .unwrap_err();
+            assert!(
+                matches!(e, AssetError::UnclassifiedImageClaims { .. }),
+                "{e}"
+            );
+            assert_eq!(e.code().as_str(), "asset.unclassified_image_claims");
+            assert!(e.to_string().contains(&id), "the asset is named: {e}");
+            assert!(
+                e.to_string().contains("re-import"),
+                "the remedy is stated: {e}"
+            );
+            let d = e.to_diagnostic();
+            assert!(
+                d.context.values().any(|v| v == axis),
+                "the failing axis is a field: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn premultiplication_happens_after_the_transfer_in_linear_space() {
+        let dir = tempfile::tempdir().unwrap();
+        // Encoded colour 128 and alpha 128: doing the multiply in encoded space would give
+        // eotf((128/255)^2) = 0.05166615, a different number from the correct 0.10835351.
+        let bytes = encode_png(
+            1,
+            1,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &[128, 128, 128, 128],
+        );
+        let srgb_straight = claims(ImageColorSpace::Srgb, ImageAlpha::Straight);
+
+        let straight = decode(
+            &dir,
+            "p.png",
+            &bytes,
+            srgb_straight,
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        close(straight.pixels[0][0], 0.21586050);
+        close(straight.pixels[0][3], 0.50196078);
+
+        let premul = decode(
+            &dir,
+            "p.png",
+            &bytes,
+            srgb_straight,
+            DecoderConfiguration::Rgba8Premultiplied,
+        )
+        .unwrap();
+        // rgb_linear * alpha = 0.21586050 * 0.50196078.
+        close(premul.pixels[0][0], 0.10835351);
+        close(premul.pixels[0][3], 0.50196078);
+        assert!(
+            (premul.pixels[0][0] - 0.05166615).abs() > 1e-3,
+            "premultiplying in encoded space would give 0.05166615, which is wrong"
+        );
+    }
+
+    #[test]
+    fn opaque_forces_alpha_one_even_when_the_png_carries_a_transparent_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = encode_png(
+            1,
+            1,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &[200, 100, 50, 0],
+        );
+        let decoded = decode(
+            &dir,
+            "o.png",
+            &bytes,
+            claims(ImageColorSpace::Srgb, ImageAlpha::Opaque),
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.pixels[0][3], 1.0,
+            "the file's zero alpha is overridden"
+        );
+    }
+
+    /// A real 8x8 Adam7 interlaced grayscale PNG, generated from the grid `value(x,y) =
+    /// x*32 + y*4` with correct chunk CRCs. The `png` encoder cannot write interlaced data,
+    /// so the fixture is built by hand from the format's own pass layout and embedded.
+    const INTERLACED_PNG: [u8; 147] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 0,
+        0, 0, 1, 150, 99, 209, 193, 0, 0, 0, 90, 73, 68, 65, 84, 120, 218, 1, 79, 0, 176, 255, 0,
+        0, 0, 128, 0, 16, 144, 0, 64, 192, 0, 80, 208, 0, 8, 72, 136, 200, 0, 24, 88, 152, 216, 0,
+        32, 96, 160, 224, 0, 40, 104, 168, 232, 0, 48, 112, 176, 240, 0, 56, 120, 184, 248, 0, 4,
+        36, 68, 100, 132, 164, 196, 228, 0, 12, 44, 76, 108, 140, 172, 204, 236, 0, 20, 52, 84,
+        116, 148, 180, 212, 244, 0, 28, 60, 92, 124, 156, 188, 220, 252, 66, 171, 31, 129, 86, 229,
+        79, 82, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    #[test]
+    fn an_interlaced_png_decodes_to_the_same_pixels_as_its_progressive_equivalent() {
+        let dir = tempfile::tempdir().unwrap();
+        // The metadata pass must report the interlace flag WP06 is told to consult.
+        let meta = image_metadata(&write(&dir, "i.png", &INTERLACED_PNG)).unwrap();
+        assert!(meta.interlaced);
+
+        // The progressive equivalent, encoded from the same grid row-major.
+        let mut grid = Vec::new();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                grid.push((x * 32 + y * 4) as u8);
+            }
+        }
+        let progressive = encode_png(8, 8, png::ColorType::Grayscale, png::BitDepth::Eight, &grid);
+        let linear_opaque = claims(ImageColorSpace::Linear, ImageAlpha::Opaque);
+
+        let interlaced = decode(
+            &dir,
+            "i.png",
+            &INTERLACED_PNG,
+            linear_opaque,
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        let flat = decode(
+            &dir,
+            "f.png",
+            &progressive,
+            linear_opaque,
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        assert_eq!((interlaced.width, interlaced.height), (8, 8));
+        assert_eq!(
+            interlaced.pixels, flat.pixels,
+            "Adam7 expands to the same raster"
+        );
+        // Spot-check authored value at (x=3, y=2): 3*32 + 2*4 = 104, linear 104/255.
+        close(interlaced.pixels[2 * 8 + 3][0], 104.0 / 255.0);
+        close(interlaced.pixels[2 * 8 + 3][3], 1.0);
+    }
+
+    #[test]
+    fn grayscale_and_paletted_pngs_expand_to_four_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let linear_opaque = claims(ImageColorSpace::Linear, ImageAlpha::Opaque);
+
+        let grey = encode_png(1, 1, png::ColorType::Grayscale, png::BitDepth::Eight, &[77]);
+        let decoded = decode(
+            &dir,
+            "g.png",
+            &grey,
+            linear_opaque,
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        assert_eq!(decoded.pixels.len(), 1);
+        close(decoded.pixels[0][0], 77.0 / 255.0);
+        close(decoded.pixels[0][1], 77.0 / 255.0);
+        close(decoded.pixels[0][2], 77.0 / 255.0);
+        close(decoded.pixels[0][3], 1.0);
+
+        // Palette entry 1 is (200, 150, 100); the crate resolves the index, not this code.
+        let indexed = encode_indexed_png(&[10, 20, 30, 200, 150, 100], &[1]);
+        let decoded = decode(
+            &dir,
+            "p.png",
+            &indexed,
+            linear_opaque,
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        close(decoded.pixels[0][0], 200.0 / 255.0);
+        close(decoded.pixels[0][1], 150.0 / 255.0);
+        close(decoded.pixels[0][2], 100.0 / 255.0);
+        close(decoded.pixels[0][3], 1.0);
+    }
+
+    #[test]
+    fn a_sixteen_bit_png_is_reduced_to_eight_bits_before_the_transfer() {
+        let dir = tempfile::tempdir().unwrap();
+        // 16-bit grayscale sample 0x8000 strips to its high byte 0x80 = 128 before the EOTF.
+        let bytes = encode_png(
+            1,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::Sixteen,
+            &[0x80, 0x00],
+        );
+        let decoded = decode(
+            &dir,
+            "16.png",
+            &bytes,
+            claims(ImageColorSpace::Srgb, ImageAlpha::Opaque),
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        // eotf(128/255), the same value an 8-bit 128 sample gives: the low byte is dropped.
+        close(decoded.pixels[0][0], 0.21586050);
+    }
+
+    /// A real 4x4 grayscale JPEG (mid-grey 128), encoded by Pillow at quality 95. JPEG is
+    /// lossy, so the assertions are structural — dimensions, opaque alpha, luma replicated
+    /// across RGB — plus the transfer divergence, not an exact colour oracle.
+    const GREY_JPEG: &[u8; 331] = include_bytes!("../tests/fixtures/grey.jpg");
+
+    #[test]
+    fn a_jpeg_decodes_to_opaque_rgb_and_honours_the_records_transfer() {
+        let dir = tempfile::tempdir().unwrap();
+        let linear = decode(
+            &dir,
+            "g.jpg",
+            GREY_JPEG,
+            claims(ImageColorSpace::Linear, ImageAlpha::Opaque),
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        assert_eq!((linear.width, linear.height), (4, 4));
+        assert_eq!(linear.pixels.len(), 16);
+        for pixel in &linear.pixels {
+            // Grayscale luma replicates across the three channels; JPEG carries no alpha.
+            close(pixel[0], pixel[1]);
+            close(pixel[1], pixel[2]);
+            assert_eq!(pixel[3], 1.0);
+            assert!((0.0..=1.0).contains(&pixel[0]));
+        }
+        let srgb = decode(
+            &dir,
+            "g.jpg",
+            GREY_JPEG,
+            claims(ImageColorSpace::Srgb, ImageAlpha::Opaque),
+            DecoderConfiguration::Rgba8Unpremultiplied,
+        )
+        .unwrap();
+        assert!(
+            (linear.pixels[0][0] - srgb.pixels[0][0]).abs() > 0.1,
+            "the record's transfer applies to JPEG exactly as to PNG"
+        );
+    }
+
+    #[test]
+    fn an_audio_configuration_is_refused_for_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = encode_png(
+            1,
+            1,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &[1, 2, 3, 4],
+        );
+        let e = decode(
+            &dir,
+            "a.png",
+            &bytes,
+            claims(ImageColorSpace::Srgb, ImageAlpha::Straight),
+            DecoderConfiguration::PcmF32Interleaved,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, AssetError::IncompatibleDecodeConfiguration { .. }),
+            "{e}"
+        );
+        assert_eq!(e.code().as_str(), "asset.incompatible_decode_configuration");
+        assert!(e.to_string().contains("pcm-f32-interleaved"), "{e}");
+    }
+
+    #[test]
+    fn truncated_and_garbage_bytes_are_typed_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = encode_png(2, 2, png::ColorType::Rgba, png::BitDepth::Eight, &[0u8; 16]);
+        let srgb_straight = claims(ImageColorSpace::Srgb, ImageAlpha::Straight);
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("truncated png", valid[..20].to_vec()),
+            ("png signature only", ImageFormat::Png.signature().to_vec()),
+            (
+                "garbage jpeg",
+                vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x03, 0x08, 0x00, 0x00],
+            ),
+            ("jpeg signature only", vec![0xFF, 0xD8]),
+        ];
+        for (label, bytes) in cases {
+            let name = if label.contains("jpeg") {
+                "bad.jpg"
+            } else {
+                "bad.png"
+            };
+            let e = decode(
+                &dir,
+                name,
+                &bytes,
+                srgb_straight,
+                DecoderConfiguration::Rgba8Unpremultiplied,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(e, AssetError::MalformedAsset { .. }),
+                "{label}: {e}"
+            );
+        }
     }
 }

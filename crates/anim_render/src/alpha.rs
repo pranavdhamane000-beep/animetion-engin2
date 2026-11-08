@@ -102,6 +102,66 @@ impl AlphaMode {
     }
 }
 
+/// A stable grouping key for 15.7's `material_pass` sort term.
+///
+/// With no material type in the authored data yet, the alpha mode is the only material fact
+/// an item carries, so it is what groups. The numbering is fixed here rather than derived
+/// from a discriminant cast so that adding a variant cannot silently renumber the sort.
+#[must_use]
+pub const fn mode_id(mode: AlphaMode) -> u16 {
+    match mode {
+        AlphaMode::Opaque => 0,
+        AlphaMode::AlphaTest { .. } => 1,
+        AlphaMode::Straight => 2,
+        AlphaMode::Premultiplied => 3,
+        AlphaMode::AdditivePremultiplied => 4,
+    }
+}
+
+/// The alpha mode an image asset's recorded claims imply.
+///
+/// `ImageAlpha` has three variants and `AlphaMode` has five, so this mapping is not onto.
+/// `AlphaTest` needs a cutoff and the two premultiplied modes need a premultiplication
+/// intent, and no authored field carries either — WP12's material contract is where they
+/// become authorable, and this function is the single place that extension happens.
+/// `Unclassified` never reaches here: `draw_list::claims_mode` refuses it first, because
+/// 15.11 forbids the silent transfer-function fallback an inferred default would be.
+#[must_use]
+pub const fn mode_from_claims(claims: anim_assets::ImageAssetClaims) -> AlphaMode {
+    match claims.alpha {
+        anim_assets::ImageAlpha::Opaque => AlphaMode::Opaque,
+        // PNG alpha is straight by the format's definition (DECISIONS.md #40 ruling 2), so
+        // a straight claim means the shader does the multiply, not the decoder.
+        anim_assets::ImageAlpha::Straight | anim_assets::ImageAlpha::Unclassified => {
+            AlphaMode::Straight
+        }
+    }
+}
+
+/// Whether a mode's pixels must already be premultiplied when they reach the shader.
+///
+/// 15.7: "Assets already marked premultiplied are not multiplied again." The mark is the
+/// decode configuration, so a `Premultiplied` item sampled from a straight-decoded texture
+/// would blend unattenuated RGB over the destination — brighter than authored, and finite
+/// and plausible at every step. The graph checks this pairing rather than trusting it.
+#[must_use]
+pub const fn expects_premultiplied(mode: AlphaMode) -> bool {
+    matches!(
+        mode,
+        AlphaMode::Premultiplied | AlphaMode::AdditivePremultiplied
+    )
+}
+
+/// Whether the shader multiplies RGB by alpha for this item.
+///
+/// The conjunction of two facts: the mode asks for a multiply ([`AlphaMode::premultiply_in_shader`])
+/// and the texture is not already multiplied. Computing it here rather than branching in
+/// five shaders gives 15.7's prohibition one producer and one unit test.
+#[must_use]
+pub const fn premultiply_for(mode: AlphaMode, texture_premultiplied: bool) -> bool {
+    mode.premultiply_in_shader() && !texture_premultiplied
+}
+
 /// The RGB a fully transparent pixel carries when the output is converted to straight
 /// alpha, where its color is otherwise undefined.
 ///
@@ -112,20 +172,6 @@ impl AlphaMode {
 /// would mean a round trip through a straight-alpha codec changes the image, which is a
 /// defect that would surface as a colour fringing report two packages later.
 pub const ZERO_ALPHA_RGB: [f32; 3] = [0.0, 0.0, 0.0];
-
-/// Which auxiliary attachments a pass may write. Spec 15.6's second paragraph, as one type.
-///
-/// This is the rule that keeps the forward graph honest about what the post chain can
-/// assume: 15.6 says transparent objects "do not write depth, normals or velocity, and post
-/// effects document the resulting limitation", so the limitation has to be *attached to the
-/// pass* rather than remembered by whoever writes the next shader.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuxWrites {
-    /// HDR color, depth, normals and velocity. The opaque and alpha-test passes.
-    All,
-    /// HDR color only; depth is read, never written. The ordered 2D and transparent passes.
-    ColorOnly,
-}
 
 /// The blend state 15.7 names for each mode, or `None` when the pass writes through.
 #[must_use]
@@ -193,20 +239,6 @@ pub fn classify(alpha: AlphaMode, authored_z: f64) -> crate::graph::PassKind {
     }
 }
 
-/// What each pass may write, as one lookup rather than five shader comments.
-#[must_use]
-pub const fn aux_writes(pass: crate::graph::PassKind) -> AuxWrites {
-    match pass {
-        crate::graph::PassKind::Opaque => AuxWrites::All,
-        crate::graph::PassKind::Ordered2d
-        | crate::graph::PassKind::Transparent
-        | crate::graph::PassKind::Post { .. }
-        | crate::graph::PassKind::ToneMap
-        | crate::graph::PassKind::Grade
-        | crate::graph::PassKind::Output => AuxWrites::ColorOnly,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -246,8 +278,8 @@ mod tests {
 
     #[test]
     fn the_two_standard_modes_share_one_descriptor_and_differ_only_in_the_multiply() {
-        let straight = blend_descriptor(AlphaMode::Straight).unwrap_or_default();
-        let premul = blend_descriptor(AlphaMode::Premultiplied).unwrap_or_default();
+        let straight = blend_descriptor(AlphaMode::Straight).unwrap();
+        let premul = blend_descriptor(AlphaMode::Premultiplied).unwrap();
         assert_eq!(straight, premul, "15.7 gives both One/OneMinusSrcAlpha");
         for component in [straight.color, straight.alpha] {
             assert_eq!(component.src_factor, wgpu::BlendFactor::One);
@@ -257,7 +289,7 @@ mod tests {
 
     #[test]
     fn additive_uses_one_and_one_for_color_and_alpha() {
-        let additive = blend_descriptor(AlphaMode::AdditivePremultiplied).unwrap_or_default();
+        let additive = blend_descriptor(AlphaMode::AdditivePremultiplied).unwrap();
         assert_eq!(additive.color.src_factor, wgpu::BlendFactor::One);
         assert_eq!(additive.color.dst_factor, wgpu::BlendFactor::One);
         assert_eq!(additive.alpha.dst_factor, wgpu::BlendFactor::One);
@@ -278,16 +310,15 @@ mod tests {
 
     #[test]
     fn a_cutoff_outside_the_unit_interval_is_refused_not_clamped() {
-        let entity = anim_core::id::NodeId::derive(
-            &anim_core::id::DERIVED_NAMESPACE,
-            b"anim_render/test/alpha-cutoff",
-        );
+        let entity = test_node("anim_render/test/alpha-cutoff");
         for cutoff in [-0.5f32, 1.5, 2.0, f32::NAN, f32::INFINITY] {
             let mode = AlphaMode::AlphaTest { cutoff };
             let err = mode.validate(entity).err();
             assert!(err.is_some(), "{cutoff} must be refused, not clamped");
             match err {
-                Some(RenderError::InvalidAlphaCutoff { cutoff: reported, .. }) => {
+                Some(RenderError::InvalidAlphaCutoff {
+                    cutoff: reported, ..
+                }) => {
                     if cutoff.is_finite() {
                         assert_eq!(reported, cutoff, "the refusal names the value");
                     }
@@ -321,26 +352,13 @@ mod tests {
             PassKind::Transparent,
             "an extreme depth is still a depth"
         );
-        for alpha in [
-            AlphaMode::Opaque,
-            AlphaMode::AlphaTest { cutoff: 0.5 },
-        ] {
-            assert_eq!(classify(alpha, 0.0), PassKind::Opaque, "{alpha:?} is forward");
-            assert_eq!(classify(alpha, 400.0), PassKind::Opaque);
-        }
-    }
-
-    #[test]
-    fn only_the_forward_opaque_pass_writes_auxiliaries() {
-        use crate::graph::PassKind;
-        assert_eq!(aux_writes(PassKind::Opaque), AuxWrites::All);
-        for pass in [PassKind::Ordered2d, PassKind::Transparent, PassKind::Output] {
+        for alpha in [AlphaMode::Opaque, AlphaMode::AlphaTest { cutoff: 0.5 }] {
             assert_eq!(
-                aux_writes(pass),
-                AuxWrites::ColorOnly,
-                "{pass:?} must not write normals or velocity: 15.6 says so, and the post \
-                 chain's limitation statement depends on it"
+                classify(alpha, 0.0),
+                PassKind::Opaque,
+                "{alpha:?} is forward"
             );
+            assert_eq!(classify(alpha, 400.0), PassKind::Opaque);
         }
     }
 
@@ -349,11 +367,7 @@ mod tests {
         // premul = straight * alpha at alpha 0 is zero for every straight color, so the
         // only choice that survives a round trip through a straight-alpha codec is zero.
         for straight in [[1.0, 0.0, 0.0], [0.2, 0.7, 0.9], [0.0, 0.0, 0.0]] {
-            let premul = [
-                straight[0] * 0.0,
-                straight[1] * 0.0,
-                straight[2] * 0.0,
-            ];
+            let premul = [straight[0] * 0.0, straight[1] * 0.0, straight[2] * 0.0];
             assert_eq!(premul, ZERO_ALPHA_RGB);
         }
     }

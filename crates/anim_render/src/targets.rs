@@ -120,12 +120,15 @@ impl RenderTargets {
                 | TextureUsages::COPY_SRC,
         );
         let views = TargetViews {
-            scene_hdr: view(device, &scene_hdr),
-            depth: view(device, &depth),
-            normal: view(device, &normal),
-            velocity: view(device, &velocity),
-            post: [view(device, &post_hdr[0]), view(device, &post_hdr[1])],
-            scene_output: view(device, &scene_output),
+            scene_hdr: view(&scene_hdr, "scene_hdr_view"),
+            depth: view(&depth, "depth_view"),
+            normal: view(&normal, "normal_view"),
+            velocity: view(&velocity, "velocity_view"),
+            post: [
+                view(&post_hdr[0], "post_hdr_view[0]"),
+                view(&post_hdr[1], "post_hdr_view[1]"),
+            ],
+            scene_output: view(&scene_output, "scene_output_view"),
         };
         Ok(Self {
             extent,
@@ -187,9 +190,9 @@ fn attach(
     })
 }
 
-fn view(device: &wgpu::Device, texture: &Texture) -> TextureView {
-    device.create_texture_view(&wgpu::TextureViewDescriptor {
-        label: texture.label(),
+fn view(texture: &Texture, label: &str) -> TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some(label),
         dimension: Some(TextureViewDimension::D2),
         ..Default::default()
     })

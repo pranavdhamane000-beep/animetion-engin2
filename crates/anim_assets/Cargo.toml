@@ -6,15 +6,19 @@ rust-version.workspace = true
 publish.workspace = true
 
 # Spec 11.4. `hound` is the pinned WAV reader (spec 5.1) that `audio.rs` uses for
-# PCM metadata; no image decoder appears here because spec 5.1 lists none — see
-# DECISIONS.md #26 for why `image.rs` reads headers itself.
+# PCM metadata. `png` and `zune-jpeg` are the spec 3.2 exception recorded in
+# ADR-0001 and ruled in DECISIONS.md #41 ruling 2: #26 made `image.rs`
+# metadata-only because no consumer existed, and WP06 is that consumer, so the
+# deferral expires here rather than being reopened.
 [dependencies]
 anim_core = { path = "../anim_core" }
 blake3.workspace = true
 hex.workspace = true
 hound.workspace = true
+png.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+zune-jpeg.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

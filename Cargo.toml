@@ -87,6 +87,20 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 half = { version = "2.7.1", features = ["bytemuck"] }
 glam = { version = "0.34.2", features = ["bytemuck", "scalar-math"] }
 
+# --- Image decode (WP06 consumer; the deferral in DECISIONS.md #26 expires here) ---
+# Spec 11.4 already permits anim_assets to depend on "decoder libraries" and 11.3
+# names image.rs as "Image metadata, color and alpha decode", but spec 5.1's table
+# lists no image codec, so these two are a spec 3.2 dependency exception: recorded
+# in ADR-0001's exceptions table and ruled in DECISIONS.md #41 ruling 2.
+# Both `=`-pinned because they decide output bytes. The pairing is not guessed:
+# image 0.25.10 in the local registry cache depends on exactly png 0.18 and
+# zune-jpeg 0.5.5, so this is a combination that has been built.
+# Two narrow decoders rather than the `image` crate: `image` enables a codec per
+# feature and pulls ravif/rav1e for AVIF *encoding*, which this engine never does.
+# An enabled decoder is a decoder that can be reached by an unexpected input stream.
+png = { version = "=0.18.1", default-features = false }
+zune-jpeg = { version = "=0.5.5", default-features = false }
+
 # --- Win32 (target-gated; see [target.'cfg(windows)'.dependencies] in crates) ---
 # Feature set verified against the windows-0.62.2 source in the local registry
 # cache, not recalled. Two non-obvious points:

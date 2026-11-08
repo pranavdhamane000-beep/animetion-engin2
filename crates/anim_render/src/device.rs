@@ -124,8 +124,8 @@ impl AdapterRecord {
     fn from_info(info: &AdapterInfo) -> Self {
         Self {
             name: info.name.clone(),
-            vendor_id: u32::from(info.vendor),
-            device_id: u32::from(info.device),
+            vendor_id: info.vendor,
+            device_id: info.device,
             device_type: format!("{:?}", info.device_type),
             pci_bus_id: info.device_pci_bus_id.clone(),
             driver_name: info.driver.clone(),
@@ -253,31 +253,30 @@ impl GpuContext {
         let mut last_seen = 0usize;
         let mut phantom = Vec::new();
         for attempt in 1..=config.attempts.max(1) {
-            let adapters =
-                pollster::block_on(instance.enumerate_adapters(Backends::VULKAN));
+            let adapters = pollster::block_on(instance.enumerate_adapters(Backends::VULKAN));
             last_seen = adapters.len();
             if adapters.is_empty() {
-                phantom.push(format!("attempt {attempt}: Vulkan enumerated zero adapters"));
+                phantom.push(format!(
+                    "attempt {attempt}: Vulkan enumerated zero adapters"
+                ));
                 drop(adapters);
                 wait_between_attempts(config, attempt);
                 continue;
             }
 
             let matched: Vec<Adapter> = match config.selection {
-                Selection::ExplicitIndex(index) => {
-                    match adapters.get(index) {
-                        Some(adapter) => vec![adapter.clone()],
-                        None => {
-                            return Err(RenderError::IdentityUnavailable {
-                                detail: format!(
-                                    "explicit adapter index {index} is not in this process's \
+                Selection::ExplicitIndex(index) => match adapters.get(index) {
+                    Some(adapter) => vec![adapter.clone()],
+                    None => {
+                        return Err(RenderError::IdentityUnavailable {
+                            detail: format!(
+                                "explicit adapter index {index} is not in this process's \
                                      enumeration of {last_seen} adapter(s); the index addresses \
                                      the list this run produced and is not stable across boots"
-                                ),
-                            })
-                        }
+                            ),
+                        })
                     }
-                }
+                },
                 Selection::ValidatedRule => adapters
                     .iter()
                     .filter(|adapter| {
@@ -291,10 +290,9 @@ impl GpuContext {
 
             match matched.len() {
                 1 => {
-                    let adapter = matched
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| RenderError::internal("adapter-selection", "one match lost"))?;
+                    let adapter = matched.into_iter().next().ok_or_else(|| {
+                        RenderError::internal("adapter-selection", "one match lost")
+                    })?;
                     let record = AdapterRecord::from_info(&adapter.get_info());
                     revalidate(&record, &config.expected)?;
                     require_pci_anchor(&record)?;
@@ -537,13 +535,10 @@ fn open_device(adapter: &Adapter) -> Result<(Device, Queue), RenderError> {
 /// board. Exactly one match is required: two identical cards are distinguishable by PCI bus
 /// id, and `DXGI_ADAPTER_DESC1` has no PCI field, which is #18 decision 4's whole point.
 #[cfg(windows)]
-fn check_dedicated_video_memory(
-    record: &AdapterRecord,
-    expected: &ExpectedAdapter,
-) -> VramFloor {
+fn check_dedicated_video_memory(record: &AdapterRecord, expected: &ExpectedAdapter) -> VramFloor {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_REMOTE,
-        DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
+        DXGI_ADAPTER_FLAG_SOFTWARE,
     };
 
     let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
@@ -615,12 +610,10 @@ fn check_dedicated_video_memory(
 /// It exists so the crate compiles rather than so a fallback can be exercised: the honest
 /// answer on an unplanned platform is "the guard did not run".
 #[cfg(not(windows))]
-fn check_dedicated_video_memory(
-    _record: &AdapterRecord,
-    _expected: &ExpectedAdapter,
-) -> VramFloor {
+fn check_dedicated_video_memory(_record: &AdapterRecord, _expected: &ExpectedAdapter) -> VramFloor {
     VramFloor::Indeterminate {
-        detail: "this build is not the Windows build the workspace pins, so DXGI is absent".to_owned(),
+        detail: "this build is not the Windows build the workspace pins, so DXGI is absent"
+            .to_owned(),
     }
 }
 
@@ -705,7 +698,13 @@ mod tests {
         });
         let err = revalidate(&igpu, &ExpectedAdapter::reference()).unwrap_err();
         assert!(
-            matches!(err, RenderError::AdapterRevalidation { field: "pci_bus_id", .. }),
+            matches!(
+                err,
+                RenderError::AdapterRevalidation {
+                    field: "pci_bus_id",
+                    ..
+                }
+            ),
             "the iGPU must be refused by the anchor, not by whichever field differs first: {err}"
         );
     }
@@ -783,10 +782,10 @@ mod tests {
         }
         // Depth is required to be *sampled* as well as attached: 15.6 gives normals and
         // velocity validity semantics, and 29's depth-aware post effects read depth.
-        assert!(REQUIRED_CAPABILITIES.iter().any(
-            |(format, usages, _)| *format == TextureFormat::Depth32Float
-                && usages.contains(TextureUsages::TEXTURE_BINDING)
-        ));
+        assert!(REQUIRED_CAPABILITIES
+            .iter()
+            .any(|(format, usages, _)| *format == TextureFormat::Depth32Float
+                && usages.contains(TextureUsages::TEXTURE_BINDING)));
     }
 
     /// The floor is a floor. Exactly 3892 MiB passes, 3891 does not, and an integrated

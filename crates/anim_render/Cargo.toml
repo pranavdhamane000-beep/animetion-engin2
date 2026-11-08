@@ -5,7 +5,57 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 15.4 lists these exactly: `anim_core`, `anim_assets`, `anim_scene`, `anim_sim`,
+# `wgpu`, `bytemuck`, `half`, `glam`, `thiserror` and target-gated `windows`. Two
+# additions, both recorded rather than smuggled:
+#
+#   `pollster` — `Instance::enumerate_adapters` and `Adapter::request_device` are
+#   `impl Future` in wgpu 30, and every entry point 15.9 gives this crate is
+#   synchronous. Already in the lock for the WP00 probes (ADR-0001), so this is not
+#   a new edge in the dependency graph.
+#
+#   `anim_project` — 15.7 makes camera cuts a history-invalidation condition,
+#   `SceneEvent::kind` is `anim_project::EventKind`, and `anim_scene` re-exports the
+#   occurrence type but not the kind vocabulary. Same reasoning as deviation row
+#   17(a) records for `anim_sim`. What 15.4 actually prohibits — that `anim_render`
+#   never depends on `anim_export` or `anim_editor` — holds.
+#
+# `ash` is deliberately absent. DECISIONS.md #40 ruling 1 closes ADR-0002
+# consequence 6: the PCI anchor comes from `wgpu::AdapterInfo::device_pci_bus_id`,
+# which wgpu-hal populates from `VK_EXT_pci_bus_info`, so production needs no raw
+# Vulkan dependency and opens no second `VkInstance`.
+#
+# `windows` is target-gated per 15.4 and used for one thing: `IDXGIAdapter1::GetDesc1`'s
+# `DedicatedVideoMemory`, the floor #18 decision 2 requires and #40 ruling 5 shapes.
+# LUID correlation and the memory *budget* stay WP07's.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_scene = { path = "../anim_scene" }
+anim_sim = { path = "../anim_sim" }
+anim_project = { path = "../anim_project" }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+# 15.4's prohibition is on the *consumers* — `anim_export` and `anim_editor` — and
+# neither appears here. `uuid` is for the tests' typed ids: every crate derives
+# fixture identities from the RFC 4122 DNS namespace rather than an entropy source
+# (spec 6.3), and `SceneSnapshot`/`SimulationFrame`/`AssetManifest` all have public
+# constructors, so a test builds its own inputs instead of pulling in a document layer.
+uuid = { workspace = true }
+# The golden suite writes a real PNG and imports it, so 15.12's "linear decoding" clause is
+# checked against a file rather than a procedural stand-in. Both are already workspace
+# dependencies and already in the lock; neither is a new package.
+png = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -36,7 +36,7 @@ pub use decode::{
 };
 pub use hash::{hash_bytes, hash_file, hash_stream, ContentHash, StreamingHash};
 pub use image::{
-    classify_image, image_metadata, EmbeddedProfile, ImageAlpha, ImageAssetClaims,
+    classify_image, image_metadata, DecodedImage, EmbeddedProfile, ImageAlpha, ImageAssetClaims,
     ImageColorMarkers, ImageColorSpace, ImageDecoder, ImageFormat, ImageMetadata, PixelLayout,
     UNMODELLED_PROFILE_CODE,
 };
@@ -81,6 +81,16 @@ pub(crate) const CHUNK_SIZE: usize = 64 * 1024;
 /// two that arrived with schema version 2's colour and alpha claims. Both are constructor
 /// refusals rather than file faults — the record disagrees with itself, not with its
 /// bytes — which is why neither one borrows `MalformedAsset`'s message.
+///
+/// [`AssetError::UnclassifiedImageClaims`] and
+/// [`AssetError::IncompatibleDecodeConfiguration`] arrived with WP06's pixel decode
+/// (DECISIONS.md #41 ruling 2). The first is the render-time refusal spec 15.11 requires:
+/// a record whose colour space or alpha mode is `Unclassified` cannot be decoded without
+/// guessing a transfer function, so the asset is named and the remedy (re-import to
+/// classify) is stated rather than approximated. It is distinct from `MissingImageClaims`,
+/// which names a record that carries *no* claims; this one carries a claim that declines to
+/// answer. The second names a decode configuration that does not match the asset's kind —
+/// an audio PCM target requested for an image — which no existing variant describes.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AssetError {
     /// Filesystem failure, with the operation that attempted it. Never carries file
@@ -152,6 +162,28 @@ pub enum AssetError {
     #[error("asset {asset_id} of kind {kind} cannot carry image colour and alpha claims")]
     UnexpectedImageClaims { asset_id: String, kind: String },
 
+    /// A pixel decode requested against a record whose colour space or alpha mode is
+    /// `Unclassified`. Spec 15.11 forbids a silent transfer-function fallback, and an
+    /// inferred default is that fallback (DECISIONS.md #41 ruling 2), so the decode is
+    /// refused rather than guessed. `axis` is the claim that declined to answer
+    /// (`color_space` or `alpha`); the remedy is to re-import the asset so the importer
+    /// classifies it, which is a different action from `MissingImageClaims`' absent record.
+    #[error("asset {asset_id} records an unclassified {axis}; re-import the asset to classify it before decoding")]
+    UnclassifiedImageClaims { asset_id: String, axis: String },
+
+    /// A decode configuration that does not match the asset's kind — the audio PCM target
+    /// requested for an image, or an image target for audio. No decoder can honour it, and
+    /// the configuration is named so the caller sees which axis was wrong rather than a
+    /// generic "unsupported" report.
+    #[error(
+        "asset {asset_id} of kind {kind} cannot be decoded with configuration {configuration}"
+    )]
+    IncompatibleDecodeConfiguration {
+        asset_id: String,
+        kind: String,
+        configuration: String,
+    },
+
     /// No decoder is registered for this kind, or the record's importer version is
     /// not one this build dispatches.
     #[error("no decoder registered for asset kind {kind} at importer version {importer_version}")]
@@ -201,6 +233,10 @@ impl AssetError {
             Self::DependencyCycle { .. } => "asset.dependency_cycle",
             Self::MissingImageClaims { .. } => "asset.missing_image_claims",
             Self::UnexpectedImageClaims { .. } => "asset.unexpected_image_claims",
+            Self::UnclassifiedImageClaims { .. } => "asset.unclassified_image_claims",
+            Self::IncompatibleDecodeConfiguration { .. } => {
+                "asset.incompatible_decode_configuration"
+            }
             Self::UnsupportedDecoder { .. } => "asset.unsupported_decoder",
             Self::MalformedAsset { .. } => "asset.malformed_asset",
             Self::Cancelled { .. } => "asset.cancelled",
@@ -272,6 +308,17 @@ impl AssetError {
             Self::UnexpectedImageClaims { asset_id, kind } => base
                 .with_context("asset_id", asset_id.clone())
                 .with_context("kind", kind.clone()),
+            Self::UnclassifiedImageClaims { asset_id, axis } => base
+                .with_context("asset_id", asset_id.clone())
+                .with_context("axis", axis.clone()),
+            Self::IncompatibleDecodeConfiguration {
+                asset_id,
+                kind,
+                configuration,
+            } => base
+                .with_context("asset_id", asset_id.clone())
+                .with_context("kind", kind.clone())
+                .with_context("configuration", configuration.clone()),
             Self::UnsupportedDecoder {
                 kind,
                 importer_version,
@@ -352,6 +399,15 @@ mod tests {
                 asset_id: "a".into(),
                 kind: "audio".into(),
             },
+            AssetError::UnclassifiedImageClaims {
+                asset_id: "a".into(),
+                axis: "color_space".into(),
+            },
+            AssetError::IncompatibleDecodeConfiguration {
+                asset_id: "a".into(),
+                kind: "image".into(),
+                configuration: "pcm-f32-interleaved".into(),
+            },
             AssetError::UnsupportedDecoder {
                 kind: "image".into(),
                 importer_version: 3,
@@ -377,7 +433,7 @@ mod tests {
             .iter()
             .map(|e| e.code().as_str().to_owned())
             .collect();
-        assert_eq!(codes.len(), 16, "one arm per variant");
+        assert_eq!(codes.len(), 18, "one arm per variant");
         codes.sort();
         let before = codes.len();
         codes.dedup();

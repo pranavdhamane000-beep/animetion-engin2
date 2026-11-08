@@ -80,13 +80,13 @@ impl CameraFrame {
     /// [`RenderError::NonFiniteTransform`] when the on-camera's world matrix is not finite
     /// or is singular. With no camera authored there is nothing to be wrong with, and the
     /// identity is used — see [`identity_view`].
-    #[must_use]
     pub fn from_snapshot(snapshot: &SceneSnapshot, extent: Extent3d) -> Result<Self, RenderError> {
         let projection = projection(extent);
         let view = match snapshot.cameras.iter().find(|camera| camera.is_on) {
             None => identity_view(),
             Some(camera) => {
-                let world = Mat4::from_cols_array_2d(&row_major_affine(&camera.world_transform, 0.0));
+                let world =
+                    Mat4::from_cols_array_2d(&row_major_affine(&camera.world_transform, 0.0));
                 view_from_world(&world).map_err(|detail| RenderError::NonFiniteTransform {
                     entity: camera.node,
                     draw_index: 0,
@@ -303,7 +303,12 @@ impl HistoryState {
         revision: Revision,
     ) -> Vec<Invalidation> {
         let mut out = Vec::new();
-        if !self.valid {
+        // From the absence of a previous submission, NOT from `!self.valid`. Reading it
+        // from `valid` latches: the first commit reports SceneLoad, which sets valid false,
+        // which makes the second commit report SceneLoad again, forever. `previous_tick` is
+        // what the commit actually fills in, so the condition clears on the frame after the
+        // first successful submission — which is the frame that first has a history to use.
+        if self.previous_tick.is_none() {
             out.push(Invalidation::SceneLoad);
         }
         if camera.cut_serial != self.cut_serial {
@@ -356,7 +361,7 @@ impl HistoryState {
         let blocking: Vec<Invalidation> = conditions
             .iter()
             .copied()
-            .filter(Invalidation::invalidates)
+            .filter(|condition| condition.invalidates())
             .collect();
         self.valid = blocking.is_empty();
         self.last_invalidation = blocking.first().copied().unwrap_or(Invalidation::None);
@@ -424,14 +429,20 @@ mod tests {
         let p = projection(EXTENT);
         let near = p * Vec4::new(0.0, 0.0, Z_NEAR, 1.0);
         let far = p * Vec4::new(0.0, 0.0, Z_FAR, 1.0);
-        assert_eq!(near.z, 0.0, "the near plane must land on the depth clear value");
+        assert_eq!(
+            near.z, 0.0,
+            "the near plane must land on the depth clear value"
+        );
         assert_eq!(far.z, 1.0);
         // 15.6 clears depth to 1.0 and compares Less, so a point *beyond* the far plane is
         // not merely equal to the clear value: it is refused by the same test that refuses
         // nothing at all. Reported rather than clamped, because a clamp would silently pull
         // an out-of-range node onto the far plane.
         let beyond = p * Vec4::new(0.0, 0.0, Z_FAR * 2.0, 1.0);
-        assert!(beyond.z > 1.0, "out-of-range depth must stay visible as out-of-range");
+        assert!(
+            beyond.z > 1.0,
+            "out-of-range depth must stay visible as out-of-range"
+        );
     }
 
     /// The y-down half of the convention. This test is the difference between a scene
@@ -446,7 +457,10 @@ mod tests {
         // And 15.7's formula turns NDC +y into the top rows.
         let uv_above = above.y * -0.5 + 0.5;
         let uv_below = below.y * -0.5 + 0.5;
-        assert!(uv_above < uv_below, "NDC +y is the lower UV row, so +y authored is down");
+        assert!(
+            uv_above < uv_below,
+            "NDC +y is the lower UV row, so +y authored is down"
+        );
     }
 
     #[test]
@@ -454,7 +468,7 @@ mod tests {
         // Reading tx/ty as `world[2][0]`/`world[2][1]` instead would put the translation in
         // the depth row, move every sprite to z, and still produce finite numbers.
         let m = node_matrix(&[[2.0, 0.0, 7.0], [0.0, 3.0, 11.0], [0.0, 0.0, 1.0]], 5.0);
-        let t = m.translation;
+        let t = m.w_axis.truncate();
         assert_eq!([t.x, t.y, t.z], [7.0, 11.0, 5.0]);
         let scaled = m * Vec4::new(1.0, 1.0, 0.0, 1.0);
         assert_eq!([scaled.x, scaled.y], [9.0, 14.0]);
@@ -465,12 +479,15 @@ mod tests {
     #[test]
     fn an_unframed_scene_uses_the_identity_camera_not_a_guess() {
         let view = identity_view();
-        assert_eq!(view * Vec4::new(10.0, 20.0, 0.0, 1.0), Vec4::new(10.0, 20.0, 0.0, 1.0));
+        assert_eq!(
+            view * Vec4::new(10.0, 20.0, 0.0, 1.0),
+            Vec4::new(10.0, 20.0, 0.0, 1.0)
+        );
     }
 
     #[test]
     fn a_singular_camera_is_refused_rather_than_inverted_to_infinities() {
-        let zero_scale = Mat4::from_scale(glam::Vec3::ZERO, 1.0);
+        let zero_scale = Mat4::from_scale(glam::Vec3::ZERO);
         assert!(
             view_from_world(&zero_scale).is_err(),
             "a camera with zero scale must not produce a view matrix"
@@ -487,6 +504,7 @@ mod tests {
         };
         let previous = CameraFrame {
             view_proj: Mat4::from_translation(glam::Vec3::new(-40.0, 0.0, 0.0)),
+            cut_serial: 1,
             ..current
         };
         let paired = current.matrices(Some(previous));
@@ -522,7 +540,7 @@ mod tests {
         // Second, contiguous, unchanged in every other axis: valid.
         let second = state.commit_submission(&camera, EXTENT, 1, SimTick(11), revision, true);
         assert!(
-            !second.iter().any(Invalidation::invalidates),
+            !second.iter().any(|c| c.invalidates()),
             "a contiguous identical step must not invalidate: {second:?}"
         );
         assert!(state.velocity_history_valid());
@@ -545,11 +563,19 @@ mod tests {
             cut_serial: 0,
         };
         let _ = state.commit_submission(&camera, EXTENT, 1, SimTick(10), Revision(1), true);
-        let before = (state.previous_tick, state.cut_serial, state.target_generation);
+        let before = (
+            state.previous_tick,
+            state.cut_serial,
+            state.target_generation,
+        );
         let after_failure =
             state.commit_submission(&camera, EXTENT, 9, SimTick(77), Revision(5), false);
         assert_eq!(
-            (state.previous_tick, state.cut_serial, state.target_generation),
+            (
+                state.previous_tick,
+                state.cut_serial,
+                state.target_generation
+            ),
             before,
             "15.7: previous transforms update only after successful submission"
         );
@@ -590,8 +616,7 @@ mod tests {
                 SimTick(12),
                 Revision(1)
             )
-            .iter()
-            .any(|c| *c == Invalidation::Resize));
+            .contains(&Invalidation::Resize));
         assert!(state
             .detect(&camera, EXTENT, 42, SimTick(12), Revision(1))
             .contains(&Invalidation::Resize));
@@ -615,9 +640,11 @@ mod tests {
 
     #[test]
     fn device_loss_forgets_the_tick_and_keeps_the_authored_state() {
-        let mut state = HistoryState::default();
-        state.previous_tick = Some(SimTick(9));
-        state.previous_extent = Some(EXTENT);
+        let mut state = HistoryState {
+            previous_tick: Some(SimTick(9)),
+            previous_extent: Some(EXTENT),
+            ..Default::default()
+        };
         state.invalidate_for_device_loss();
         assert!(!state.valid);
         assert_eq!(state.previous_tick, None, "15.11: loss invalidates history");
@@ -634,7 +661,11 @@ mod tests {
     fn the_depth_quantum_separates_pixels_and_bundles_subpixels() {
         let bucket = |z: f32| (z * DEPTH_BUCKETS_PER_PIXEL) as i32;
         assert_ne!(bucket(0.0), bucket(1.0), "a pixel apart must not tie");
-        assert_eq!(bucket(0.0), bucket(1.0 / 512.0), "a sub-pixel difference ties");
+        assert_eq!(
+            bucket(0.0),
+            bucket(1.0 / 512.0),
+            "a sub-pixel difference ties"
+        );
         assert_eq!(bucket(-3.5), -896);
     }
 

@@ -1994,4 +1994,217 @@ with more than a handful of files to *understand* before the first edit needs ei
 allowance or its own research pass first — and the finishing is only mechanical while the gate
 keeps coming back green, which is the part that took three cycles rather than zero.
 
+### #41 — WP06 pre-code rulings: the `extract_frame` claims seam, and where pixel decode lives
+
+Two decisions taken on 2026-11-07 before any render code was written, both flagged as open by
+`crates/anim_render/wip/README.md` and `BUILD_STATE.md`'s WP06 preamble. #40's four rulings are
+untouched; this entry closes the two questions #40 left for the resuming session.
+
+#### 1. `extract_frame` reaches the claims through a widened 15.9 signature
+
+**The gap.** Spec 15.9 gives `extract_frame(scene: &SceneSnapshot, sim: &SimulationFrame,
+previous: &PreviousFrameState, quality: RenderQuality)`. A `DrawItem`'s alpha mode and colour
+transfer come from `ImageAssetClaims`, which #40 ruling 2 placed on `AssetManifestEntry.image`
+— inside `ProjectDocument.assets`. Neither argument carries it: WP04's `EvaluatedNode` has
+`asset: Option<AssetId>` and nothing else (13.8), and `SimulationFrame` has no asset vocabulary
+at all. So the signature as written cannot produce a `DrawItem`.
+
+**Ruling: append one parameter, `assets: &AssetManifest`, after `quality`.**
+
+```text
+pub fn extract_frame(scene: &SceneSnapshot, sim: &SimulationFrame,
+    previous: &PreviousFrameState, quality: RenderQuality,
+    assets: &AssetManifest) -> Result<RenderFrame, RenderError>;
+```
+
+The first four parameters keep 15.9's exact order and types, so the deviation is a pure suffix
+— the same shape #40 ruling 2 used when it encoded `AssetManifestEntry.image` last to keep every
+earlier field's byte position. `AssetManifest::get(&AssetId) -> Option<&AssetManifestEntry>` is
+already the only public route into its private `records` map, and `anim_assets` is already a
+15.4 dependency, so this adds no edge to the crate graph.
+
+**Rejected: a resolver trait.** A `ClaimsResolver`/`AssetClaimsSource` trait would have exactly
+one implementor, `AssetManifest`, and would exist only to let a test substitute a fake. But
+`SceneSnapshot` and `AssetManifest` both have public constructors and public fields, so a test
+builds the real thing — `anim_scene/tests/evaluation.rs` and `anim_sim/tests/determinism.rs`
+both do exactly that and neither uses a mock. An abstraction with one implementor and no second
+caller is the premature kind. `anim_assets::resolver` is free functions over
+`(store, manifest, id)`, not a trait, so there is no existing seam to implement either.
+
+**Rejected: claims in the snapshot.** This is the option that looks cheapest and is the most
+expensive. `snapshot_hash` is a `ContentHash` over `anim_engine/snapshot/v1` (WP04, ADR-0007),
+and adding claims to `EvaluatedNode` changes that pre-image, so **every snapshot hash in the
+project moves**. That is WP04's identity, G3 is already passed against it, and WP06 has no
+mandate to spend it. It would also make the same fact live in two places — the manifest record
+and the snapshot — which is the second-source-of-truth shape #37 deleted two frame fields for.
+
+**Rejected: a `None` stub.** `wip/draw_list.rs`'s `claims_for()` returns `None` unconditionally,
+which makes every extraction fail with `UnclassifiedAssetMetadata`. #40 §8 names it as a defect;
+it is not a seam, it is a broken function that compiles.
+
+**The lookup rules that follow**, all in `draw_list.rs`, each with a producing test:
+
+| Node state | Outcome |
+| --- | --- |
+| `visible == false` | no draw item; its transform is already composed into children by WP04 |
+| `asset == None` | no draw item — a group node, not a drawable |
+| `asset == Some(id)`, `get` returns `None` | `RenderError::MissingAsset` naming the id |
+| entry present, `image == None` | `RenderError::NotAnImageAsset` naming the id and `kind` |
+| `color_space` or `alpha` is `Unclassified` | `RenderError::UnclassifiedAssetMetadata` (#40 ruling 2's one consumer rule) |
+| classified | `alpha_mode` derived from `ImageAlpha` + the material's blend intent |
+
+Two new `RenderError` variants are needed for rows 3 and 4; 15.11's list has no row for either,
+which is the same omission class as deviation rows 9 and 19. `UnsupportedAlphaMode` stays
+**deleted** per #40 §7 — `AlphaMode` is a closed five-variant enum and all five have descriptors.
+
+#### 2. Pixel decode is implemented in `anim_assets`, with two pinned decoder libraries
+
+**The gap.** 15.12 requires golden coverage of "linear decoding", and 15.7's alpha conversion
+starts from decoded authoring colour. Nothing in the workspace decodes a pixel: #26 made WP02's
+decoders metadata-only, and `image.rs` parses PNG/JPEG *headers* itself. A workspace-wide search
+for a decode entry point returns nothing, and no codec crate is in the dependency graph. #26
+deferred this precisely because "pixel/PCM decode has no consumer until WP06/WP08" — WP06 is
+that consumer, so the deferral expires here.
+
+**Ruling (operator, 2026-11-07, asked as one bundled question with three options): add the
+decoder to `anim_assets`.** The home is already named by the spec and needs no new file: 11.3
+lists `crates/anim_assets/src/image.rs` as "Image metadata, color and alpha decode", and 11.4
+already permits `anim_assets` to depend on "decoder libraries". 11.7's resolve-and-verify step
+ends "then invoke the registered decoder", and 11.10 says "GPU textures are derived caches keyed
+by exact content and decode configuration" — so the decode belongs behind `DecoderConfiguration`
+and its result is cacheable, not authoritative.
+
+Pinned pair, chosen because `image 0.25.10` in the local registry cache already pairs these two
+versions and is therefore a combination that has been built rather than guessed:
+
+| Crate | Pin | Role |
+| --- | --- | --- |
+| `png` | `=0.18.1` | PNG decode, already in the registry cache |
+| `zune-jpeg` | `=0.5.5` | JPEG decode, pure Rust, `default-features = false` |
+
+Both are `=`-pinned on ADR-0001's rule for anything that decides output bytes. Spec 3.2 requires
+an ADR for a dependency exception, so **both rows go into ADR-0001's existing exceptions table**
+beside `ash`, `pollster` and `sha2` rather than into a new ADR number — ADR-0001 *is* the
+dependency-lock record, and the spec's ADR register assigns WP06 only ADR-0010 and ADR-0011.
+`Cargo.lock` must be regenerated and committed in the same change, because the gate runs
+`cargo test --workspace --locked` and `anim_render` currently has no `dependencies` array at all.
+
+**Rejected: decoded bytes as a typed input to `resources.rs`.** No new dependency and it stays
+inside 15.3's file list, but WP06 could then not render an imported asset end to end, and
+"linear decoding" would be tested against procedural pixels the test itself invented. That is
+a declared gap rather than a `None` stub, but it is still a gap on the one clause that needs a
+real file.
+
+**Rejected: a hand-rolled PNG decoder.** Inflate plus unfiltering with no new dependency avoids
+the exception ADR, but puts a hand-written codec on a golden-bearing path and leaves JPEG
+assets unrenderable. The risk is exactly where this project least wants it.
+
+**What the decode must respect.** `DecoderConfiguration` already has `Rgba8Unpremultiplied` and
+`Rgba8Premultiplied`, and #40 ruling 2 deliberately kept premultiplication *out* of the manifest
+record because it is a decode choice. So the configuration selects it, the derived-cache key
+(`content_hash`, `importer_version`, `configuration`) discriminates it, and the record still
+says only `srgb`/`linear` and `opaque`/`straight`. `ImageMetadata.interlaced` is documented in
+`image.rs` as the flag WP06 must consult before committing to a pass — Adam7 is decoded, not
+refused, because refusing it would make a valid PNG unrenderable with no remedy.
+
+**How to apply:** `extract_frame` takes five parameters and the fifth is the manifest; any call
+site written against 15.9's four is wrong. Decode lives in `anim_assets::image`, never in
+`anim_render` — a renderer that decodes is a renderer with a second source of colour truth.
+
+### #42 — WP06 built: the render graph, and four defects only running it could find
+
+WP06 is **code complete** and **G5 is not claimed**. The package landed as one commit after
+#41's two pre-code rulings; `crates/anim_render/wip/` is gone, its four usable files un-parked
+and its two invented ones (`graph.rs`, `draw_list.rs`) rewritten from spec 15.7–15.9 rather
+than repaired. All eighteen files 15.3 lists exist, plus the five WGSL shaders and
+`tests/golden.rs`. ADR-0010 and ADR-0011 are written and **ADR-0003 is closed**, which its own
+text said G5 depended on.
+
+#### 1. What the goldens are, and why there is no tolerance in them
+
+15.12 asks for "pinned-stack readback goldens", and the suite opens a real device through
+`GpuContext::create`, so #18's PCI/name/driver revalidation and the VRAM floor run on every
+test. On any other adapter it **refuses** rather than skipping: a golden that does not run is
+not a golden that passed, and spec 9.12 will not carry a pass across a different adapter.
+
+No numeric tolerance appears anywhere, because cross-device tolerance is WP11's ADR-0016 and
+approval is Gate 1 after S2. The goldens are instead three kinds, each exact:
+
+- **Render against render.** A `Straight` and a `Premultiplied` asset holding the same pixels
+  must produce byte-identical images; an equal-depth tie must composite the same way in either
+  insertion order; the clean scene output must equal the export readback. Comparing two
+  readbacks needs no expected colour and no transcendental to disagree about.
+- **Analytic where the arithmetic is exact.** Black is 0.0 through the tone map and through
+  both segments of the sRGB curve; alpha passes through both untouched. Those bytes are the
+  numbers the spec says they are.
+- **Structural.** The nine-element pass log, the target generation, the velocity validity and
+  the f16 HDR range are claims about what ran, not about what colour it produced.
+
+Where `pow` is involved the assertion is a *relation* — greater than, not clamped — because a
+byte there would be a tolerance in disguise.
+
+#### 2. Four defects the tests caught that reading the code would not have
+
+Each is recorded because the shape of the mistake is the reusable part.
+
+1. **`SceneLoad` latched forever.** `HistoryState::detect` read it from `!self.valid`, and
+   `commit_submission` then set `valid = blocking.is_empty()`. The first commit reported
+   `SceneLoad`, which set `valid` false, which made the second commit report `SceneLoad` again
+   — so history was never usable and every velocity was zero for the life of the process. It
+   is now detected from `previous_tick.is_none()`, which the commit actually fills in.
+2. **The graph read the previous frame's verdict for the current frame.** Even with the latch
+   fixed, `scene_uniform.history_valid` came from `self.previous.history`, which describes the
+   *last* commit. The frame right after the first submission therefore had a contiguous
+   history and a zero velocity. `RenderFrame` now carries its own `history_valid`, computed by
+   `extract_frame`. This one needed the GPU to surface: the CPU tests passed.
+3. **The uniform structs were `align(4)`, not `align(16)`.** `#[repr(C)]` over `[[f32;4];4]`
+   fields gives alignment 4, while WGSL's `mat4x4<f32>` requires 16. The *offsets* were right,
+   so the byte layout worked and nothing visibly broke — which is exactly why it is dangerous.
+   Both are now `#[repr(C, align(16))]`, and the offset tests assert the alignment too.
+4. **Two golden tests were vacuous and passed for the wrong reason.** The layer-order test
+   used one texture, and over-blending a single colour is commutative even at unequal alpha, so
+   swapping the order could not change the image; it also never sorted, because `render_items`
+   bypasses extraction. It now registers two colours and applies `total_cmp`. The
+   linear-decoding test changed only the manifest claim while the texture had been uploaded
+   from a procedural `DecodedImage`, so the claim could not affect anything; it now decodes one
+   real PNG twice under two records that differ only in `color_space`.
+
+The general rule these four point at: **a test that cannot fail is worse than no test**, and
+the way to find one is to ask what change would make it go red. Two of these four went red only
+after that question was asked of them.
+
+#### 3. What is deliberately not built
+
+- **DOF, motion blur, bloom and grade** are declared and disabled (#40 ruling 4). Their entry
+  points exist in `post.wgsl` as the disabled-stage identity and are unreachable, because
+  `PostChainConfig::validate` refuses to enable them with `PostStageUnavailable` naming
+  WP14/WP17. The disabled-pass contract is tested as data: a disabled stage produces a
+  `PassRecord` with empty reads and writes, so the log shows it was considered rather than
+  forgotten.
+- **No WP07 allocator.** `ResourceRegistry` keeps the size, usage and ownership records 16.2
+  asks for and registers nothing with a module that does not exist.
+- **No golden tolerance and no baseline approval.** ADR-0016 is not written; it is not in
+  `docs/adr/` and never was, and the spec register assigns it to WP11.
+- **`AlphaTest`, `Premultiplied` and `AdditivePremultiplied` are not authorable.** They have
+  descriptors, pipelines and goldens, but no authored field carries a cutoff or a
+  premultiplication intent. `alpha::mode_from_claims` is the one place WP12 extends.
+- **Particle rotation is not applied.** `Particle.rotation` is in turns, and building a
+  rotation matrix needs `sin`/`cos`; BUILD_STATE risk 28 requires the first package that
+  rotates a particle into a velocity to use a versioned fixed-point routine and move
+  `SIMULATION_MODEL_VERSION`, not to call trig whose bits a different C runtime could change.
+  WP06 draws particles axis-aligned and leaves the rotation to the package that owns the rule.
+
+#### 4. The transparent-sort sign, written down because it is invisible otherwise
+
+15.7 says "descending quantized_view_depth" and never says which sign depth has. The authored
+convention is +z toward the viewer, so view depth is the **negated** view-space z — distance
+along the forward axis, larger meaning farther — and descending is back-to-front. Reading
+"depth" as the authored z sorts front-to-back, blends to a different image, and is finite and
+plausible at every step. `draw_list.rs` comments the sign at the computation and
+`the_comparator_is_15_7_s_tuple_in_15_7_s_order` tests it.
+
+**How to apply:** G5 is code-complete-plus-outstanding-approval. The suite passes and the
+images exist; saying "G5 passed" is not correct until the operator approves them at Gate 1
+after S2. The next package is WP07, and `ResourceRegistry`'s records are what it consumes.
+
 
