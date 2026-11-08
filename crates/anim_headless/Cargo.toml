@@ -5,15 +5,23 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# Spec 14.3 assigns `src/replay.rs` -- headless state-hash reporting -- to this crate. The
-# dependencies are the ones that job needs and nothing else: no renderer, no audio device, no
-# editor, and no wall-clock API, because a report a second process must reproduce byte for byte
-# cannot afford any of them.
+# Spec 14.3 assigns `src/replay.rs` -- headless state-hash reporting -- to this crate, and
+# that report stays renderer-free: a report a second process must reproduce byte for byte
+# cannot afford a GPU or a wall clock. WP07's `src/budget_report.rs` (spec 16.3) is the
+# other kind of report -- advisory diagnostics, 16.4's "consumed by application/export
+# diagnostics" -- and needs `anim_render` for the manager and snapshot types. The edge is
+# recorded as a deviation at WP07 closeout; the canonical replay path does not use it.
 [dependencies]
 anim_core = { path = "../anim_core" }
 anim_assets = { path = "../anim_assets" }
 anim_project = { path = "../anim_project" }
 anim_sim = { path = "../anim_sim" }
+anim_render = { path = "../anim_render" }
+
+[features]
+default = ["dxgi-telemetry"]
+# Forwarded so the binary's attach call compiles out with the renderer's telemetry.
+dxgi-telemetry = ["anim_render/dxgi-telemetry"]
 
 [dev-dependencies]
 uuid = { workspace = true }

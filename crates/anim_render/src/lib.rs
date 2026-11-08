@@ -38,6 +38,7 @@ pub mod camera;
 pub mod device;
 pub mod draw_list;
 pub mod graph;
+pub mod memory;
 pub mod passes;
 pub mod readback;
 pub mod resources;
@@ -49,6 +50,9 @@ pub use device::{GpuContext, VramFloor};
 pub use draw_list::{extract_frame, DrawItem, PreviousFrameState};
 pub use graph::{
     create_renderer, PassKind, PassRecord, PostChainConfig, Renderer, POST_CHAIN_VERSION,
+};
+pub use memory::{
+    AdapterIdentity, BudgetSnapshot, MemoryError, MemoryManager, MemoryMode, MemoryPolicy,
 };
 pub use targets::RenderTargets;
 

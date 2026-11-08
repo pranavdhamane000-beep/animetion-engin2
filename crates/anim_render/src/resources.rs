@@ -260,6 +260,15 @@ impl ResourceRegistry {
             })
     }
 
+    /// Drop one asset's GPU handle, returning it so the caller can hold it until queued
+    /// work completes. WP07's eviction path uses this; the memory record survives in the
+    /// manager's table so the reload can restore the same identity.
+    pub fn remove_image(&mut self, asset: &AssetId) -> Option<ImageResource> {
+        let image = self.images.remove(asset)?;
+        self.total_bytes = self.total_bytes.saturating_sub(image.size_bytes);
+        Some(image)
+    }
+
     /// How many images are registered.
     #[must_use]
     pub fn len(&self) -> usize {

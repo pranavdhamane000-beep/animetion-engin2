@@ -6,6 +6,7 @@
 //! production behaviour may be derived from it (spec 9.1, 9.10).
 
 pub mod determinism;
+pub mod gpu_memory;
 pub mod probe;
 pub mod probe_tools;
 pub mod wp04_fixture;

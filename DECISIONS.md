@@ -2207,4 +2207,188 @@ plausible at every step. `draw_list.rs` comments the sign at the computation and
 images exist; saying "G5 passed" is not correct until the operator approves them at Gate 1
 after S2. The next package is WP07, and `ResourceRegistry`'s records are what it consumes.
 
+### #43 — WP07 pre-code rulings: telemetry is built, G6 is self-certifiable, G5 stays batched
+
+Three questions were put to the operator as one bundled dialog on 2026-11-08, at the start
+of the WP07 session, and all three were answered. BUILD_STATE risk 24 required the first
+answer before `dxgi-telemetry` was designed; the silence it recorded is now closed.
+
+#### 1. Risk 24 closed: full DXGI telemetry, not a static budget
+
+**Ruling:** build spec 16's primary mechanism — `IDXGIAdapter3::QueryVideoMemoryInfo` on
+the adapter correlated with the rendering device, behind the `dxgi-telemetry` feature that
+spec 5.2 defaults on for Windows. The LUID correlation is #18 decision 4's shape, unchanged:
+once per process, budget attribution only, never per frame.
+
+**What this fixes:** the policy sees the OS shrink the budget when competing processes hold
+VRAM — the everyday case on this 4 GB hybrid laptop, and the case 16.1 and 16.12 name.
+**What it does not fix:** DXGI values remain advisory and asynchronous (16.4); actual
+allocation errors stay authoritative, and the unavailable-telemetry path (16.6, 16.11) is
+still built and tested — internal accounting, conservative target, telemetry marked
+unavailable, never a query at an unrelated adapter.
+
+**Rejected:** a static conservative ceiling against a fraction of the 3892 MiB dedicated
+VRAM. Spec 5.2 permits it, but it is blind to real budget shrinkage, and since 16.12's
+unavailable-DXGI and pressure scenarios must pass either way, dropping telemetry saves the
+query and correlation code, not the policy machinery. **Consequence to record when built:**
+`ash` enters `anim_render` behind `dxgi-telemetry` for the once-per-process second
+`VkInstance` that reads `VkPhysicalDeviceIDProperties.deviceLUID` — wgpu 30 exposes no LUID
+(deviation row 3's finding). That is a departure from 16.4's dependency list, in the same
+class as rows 17(a) and 20(b), and #40's "no ash in production" applied to `device.rs`'s
+PCI anchor, which stays ash-free.
+
+#### 2. G6 is self-certifiable
+
+**Ruling:** when WP07's tests pass, "G6 passed" may be stated outright. G6's exit criterion
+(spec 8.3: memory-pressure tests converge without unsafe live-resource eviction; 16.12:
+convergence below configured targets when evictable content suffices, actionable OOM when
+it does not) is mechanical — no aesthetic judgement sits between the run and the verdict,
+which is #21's own test for self-certification, and AGENTS.md's visual-gate list does not
+name WP07. **Boundary:** this ruling covers G6. It does not extend #21 to G7 or later;
+those keep the code-complete-plus-outstanding-approval default until ruled otherwise.
+
+#### 3. G5 stays owed and batched
+
+**Ruling:** start WP07 without clearing G5 first. G5 remains outstanding under Pending
+human approvals and is batched with Gate 1 after S2, as that table intends. WP07 changes
+no rendering behaviour — it accounts for and evicts resources around the graph — so the
+unapproved G5 does not put WP07's work at risk.
+
+**How to apply:** design `memory/identity.rs` and `memory/dxgi.rs` to the telemetry ruling
+above; close risk 24 in BUILD_STATE; at WP07 closeout, state G6 plainly if 16.12 passes,
+and leave G5 exactly as it was.
+
+### #44 — WP07 design rulings: types the spec names without fields, and three bounded departures
+
+Settled while designing the memory module, before writing it, on 2026-11-08. Same class as
+#35's `Spring` ruling: spec 16 names types it never defines, and the package shapes them
+from what its algorithms consume.
+
+1. **`ResourceId` is a runtime monotonic id owned by `memory/resource.rs` — not a ninth
+   `anim_core` typed id.** It is never persisted, never hashed, and enters no canonical
+   bytes; the typed-id machinery (v5 derivation, strict parsing, 16-byte `Ord`) exists for
+   identities that survive a save, and a GPU handle's id does not. The eviction tie-break's
+   "stable resource ID" (16.7) is satisfied by assignment in registration order, which the
+   integration seam feeds in `AssetId` order.
+2. **`ResourceRecord` gains `mapped: bool`.** 16.7 excludes mapped resources from eviction
+   and 16.11 forbids freeing them, but 16.8's field list has no field that can carry the
+   state; readback staging is `MAP_READ`, so the exclusion needs a producer. Deviation row
+   to be appended at closeout, same class as row 20(d).
+3. **`ReloadState` is `{ Resident, Evicted, Queued }`.** 16.8 names it with no variants.
+   The spec's separate `resident: bool` stays and is validated consistent with the state
+   rather than deleted, because 16.8 lists both.
+4. **The budget source is an enum — `Telemetry`, `Synthetic`, `Unavailable` — not a trait.**
+   Synthetic budgets are a 16.12 requirement that must run in the ordinary gate, so they
+   are deliberately **not** behind `test-faults`: a feature the gate does not enable would
+   put the synthetic suite in deviation row 4's never-compiled class. One implementor per
+   variant and no second caller is the same reasoning that rejected a resolver trait in
+   #41 ruling 1.
+5. **`std::time::Instant` is allowed, scoped, in the telemetry query cache only.**
+   `clippy.toml` bans it to keep canonical paths clock-free; 16.4 makes telemetry advisory
+   and `MemoryPolicy.query_interval` is a `Duration`, so enforcing the cadence needs a
+   clock that never reaches canonical bytes. The allow carries a reason naming 16.4, and
+   ADR-0012 records it as a bounded exception rather than a loosened guard.
+6. **Eviction execution stays with the handle owner.** The manager never holds a GPU
+   handle: `preflight_allocation` returns a permit carrying the eviction plan, the renderer
+   drops the handles and confirms, and the permit commits only after successful creation
+   (16.8's drop-rollback semantics). Moving WP06's registry into the memory module was the
+   rejected alternative — it rewrites a certified package to solve an ownership question
+   the permit already answers.
+7. **Policy defaults (ADR-0012's register):** `target_fraction` 0.80 (16.6's own number),
+   `safety_reserve_bytes` 256 MiB, `release_band_bytes` 128 MiB, `over_budget_samples` 3,
+   `query_interval` 100 ms, `max_upload_bytes_per_frame` 64 MiB. With telemetry unavailable
+   the estimated budget is **three quarters of dedicated VRAM** and the same target formula
+   applies — conservative by construction, since ADR-0002 consequence 4 measured the real
+   local budget (3308 MiB) below the dedicated figure (3892 MiB). All are configuration
+   defaults, not hardware promises (16.6).
+8. **Fence callbacks arrive through an `mpsc` channel.** `Mutex`/`RwLock` are disallowed
+   workspace-wide; `Queue::on_submitted_work_done`'s callback sends its serial and the
+   manager drains in callback order on the render thread. An out-of-order completion is
+   counted in metrics and never advances the completed serial — it is not silently
+   absorbed, and the signature 16.9 gives (`fn on_completed(&mut self, serial: u64)`) has
+   no error channel to report it through.
+9. **"Bounded wait" is a non-blocking drain.** Preflight polls only known completions by
+   draining the channel once; there is no blocking `poll`, no sleep (`thread::sleep` is
+   disallowed), and 16.11's "never wait indefinitely" is satisfied by construction. If the
+   drain releases nothing, the eviction plan or the OOM refusal is the next step, not a
+   longer wait.
+
+### #45 — WP07 built: the memory manager, and five defects the tests caught
+
+WP07 is **built and G6 is claimed** under #43.2's self-certification ruling. The package
+landed as the ten `memory/` files spec 16.3 lists, the graph/registry/targets integration,
+`anim_app::settings`, `anim_headless::budget_report` (plus a `budget` subcommand that runs
+the live query), `anim_test_support::gpu_memory`, `crates/anim_render/tests/memory.rs` and
+ADR-0012. Deviation rows 21–23 carry the shape, file and semantic departures.
+
+#### 1. What the suite proves, and how
+
+The synthetic suite (`gpu_memory.rs`, eight tests) runs in the ordinary gate — no feature
+to enable, no GPU needed: shrinkage converges below the soft target with locked and
+required records untouched; insufficient content produces an actionable OOM with 16.11's
+four context fields; competing-process usage dominates `effective_usage` and is not
+evictable; unavailable telemetry keeps accounting alive on the conservative estimate;
+adapter mismatch degrades rather than querying the wrong card; the streak gates pressure
+while an allocation need bypasses it; rollback leaves no reservation; and a 10 000-frame
+export-shaped run logs every metric class with zero fence-order violations.
+
+The GPU suite (`tests/memory.rs`, six tests) proves the clauses that need a device: an
+evicted texture reloaded from the same decoded bytes renders **byte-identically** and keeps
+its record identity; 25 resizes keep exactly seven locked target records at 48 bytes per
+pixel plus the image; scrubbing releases completed frame buffers; device loss invalidates
+residency and a fresh renderer reconstructs identically; a malformed upload after preflight
+leaves no reservation; and configured telemetry is live through a real render. The 21 WP06
+goldens stayed byte-identical throughout — accounting changed, rendering did not.
+
+Live evidence: `anim_headless budget` correlated the pinned adapter and reported a
+3308 MiB local budget with ~194 MiB of other-process usage — the competing-process
+visibility #43.1 chose telemetry for, observed on the first run. The LUID was a fifth
+distinct value in five runs, which is #18 decision 1 again, not a problem.
+
+#### 2. Five defects the tests caught that reading the code would not have
+
+1. **A failed frame leaked its buffers and poisoned the fence order.** `render_scene`
+   registered the scene uniform buffer before `bind_item` could fail; the early return
+   left the record pending forever, and the assigned-but-unsubmitted serial left a gap
+   that made every later `on_submitted` a violation — completions would never advance
+   again. `abort_frame` now releases the frame's records and `SerialTracker::abort` reuses
+   the unsubmitted serial. The reload golden's deliberate `TextureNotRegistered` failure
+   is what surfaced it.
+2. **`evict_image` did not drain known completions.** The submission callback had fired
+   during readback's poll, but the serial sat in the channel; the texture looked in-flight
+   and the eviction was refused. Draining is how completions become known.
+3. **The last frame's required claim barred an explicit eviction.** `set_required` names
+   the frame's assets, and nothing released the claim after completion, so `evict_image`
+   on the very texture the caller asked to evict was refused. The explicit eviction now
+   removes the claim. **And the diagnostic hid the cause:** the first `EvictionIneligible`
+   message omitted the required term and the completed watermark, so the error blamed
+   everything except the thing that fired. It now names every term.
+4. **A hand-computed eviction order was wrong.** The expectation put an older record
+   before a cheaper reload, but 16.7's serial term precedes the cost term; the code was
+   right and the expectation was corrected (the project's recurring lesson, risk 2).
+5. **A resize fixture wrapped to its own start.** The extents list ended where it began,
+   so the round-boundary resize was a legitimate no-op and the generation expectation was
+   off by one. The code's equal-extent no-op is WP06's certified behavior; the fixture now
+   ends on a different extent.
+
+#### 3. What is deliberately not built
+
+- **No export pinning consumer and no preview loop.** `set_locked`, `MemoryMode::Preview`
+  and `UploadDeferred` exist and are tested; WP09 and WP10 are the callers (ADR-0012
+  consequences 1–2).
+- **No budget-change notification event.** #18 decision 4 permits
+  `RegisterVideoMemoryBudgetChangeNotificationEvent` *or* rate-limiting; the query cache
+  rate-limits, which needs no extra Win32 wait handle and no second clock exception.
+- **No scripted co-running GPU load.** Competing-process pressure is synthetic plus the
+  live external-usage observation; ADR-0012 consequence 4 states the residual.
+- **`GpuOnly` records are never evicted.** WP07 has no GpuOnly restore source, so 16.7's
+  "GPU-only-without-restore" exclusion covers the whole variant; the source class exists
+  for the package that adds one.
+
+**How to apply:** G6 is passed; G5 is unchanged (owed, batched with Gate 1). The next
+package is WP08 (deterministic offline audio), which parallelises with nothing on the
+time/identity spine but may share a session plan with WP09 per AGENTS.md — one package per
+chat still holds. `ResourceRegistry`'s records are now consumed; the seam WP06 left is
+closed.
+
 

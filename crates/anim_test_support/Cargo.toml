@@ -28,6 +28,10 @@ anim_scene = { path = "../anim_scene" }
 # in that crate (`src/replay.rs`), so the child calls it rather than restating it.
 anim_sim = { path = "../anim_sim" }
 anim_headless = { path = "../anim_headless" }
+# Added for `src/gpu_memory.rs`, spec 16.12's synthetic-budget and fault-injection suite
+# and 16.3's assignment of that file to this crate. Same precedent as the edges above:
+# the crate the claim is about has to be linkable from here.
+anim_render = { path = "../anim_render" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -54,6 +58,12 @@ windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+default = ["dxgi-telemetry"]
+# Forwarded so gpu_memory's adapter-mismatch scenario compiles out with the renderer's
+# telemetry, matching anim_headless's forwarding.
+dxgi-telemetry = ["anim_render/dxgi-telemetry"]
 
 [lints]
 workspace = true

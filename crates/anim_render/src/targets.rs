@@ -159,6 +159,33 @@ impl RenderTargets {
     pub const fn height(&self) -> u32 {
         self.extent.height
     }
+
+    /// Each attachment's label and committed bytes, for WP07 registration (16.5).
+    /// Delegates to [`attachment_sizes`] so creation-time preflight and post-creation
+    /// registration read one computation.
+    #[must_use]
+    pub fn attachment_sizes(&self) -> [(&'static str, u64); 7] {
+        attachment_sizes(self.extent)
+    }
+}
+
+/// The seven attachments' labels and byte sizes at an extent (spec 15.6's table).
+///
+/// Five `Rgba16Float` at 8 bytes, one `Depth32Float` at 4, one `Rgba8Unorm` at 4 —
+/// ADR-0003's 48 bytes per pixel for one target generation. Alignment padding is
+/// excluded, matching the `size_bytes` convention WP06's registry uses.
+#[must_use]
+pub fn attachment_sizes(extent: Extent3d) -> [(&'static str, u64); 7] {
+    let pixels = u64::from(extent.width) * u64::from(extent.height);
+    [
+        ("scene_hdr", pixels * 8),
+        ("depth", pixels * 4),
+        ("normal", pixels * 8),
+        ("velocity", pixels * 8),
+        ("post_hdr[0]", pixels * 8),
+        ("post_hdr[1]", pixels * 8),
+        ("scene_output", pixels * 4),
+    ]
 }
 
 /// Usages every Rgba16Float intermediate needs: written as an attachment, read as a

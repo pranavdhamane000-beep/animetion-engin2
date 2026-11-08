@@ -24,6 +24,8 @@
 //! [`PreviousFrameState::record`]. There is no other writer of either, so a frame that failed
 //! to submit cannot leave a previous state the next frame will believe.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anim_core::id::AssetId;
 use wgpu::{
     BindGroup, BindGroupLayout, CommandEncoder, Device, Extent3d, Queue, Sampler, TextureView,
@@ -31,10 +33,14 @@ use wgpu::{
 
 use crate::camera::CameraFrame;
 use crate::draw_list::{DrawItem, PreviousFrameState, RenderFrame};
+use crate::memory::{
+    BudgetSource, ContentSource, EvictionPlan, MemoryManager, MemoryMode, MemoryPolicy, ResourceId,
+    ResourcePriority, ResourceRecord,
+};
 use crate::passes::{self, BoundItem};
 use crate::readback::{self, OutputReadback};
-use crate::resources::{self, ItemUniform, ResourceRegistry, SceneUniform};
-use crate::targets::RenderTargets;
+use crate::resources::{self, ItemUniform, ResourceRegistry, SceneUniform, TEXEL_BYTES};
+use crate::targets::{self, RenderTargets};
 use crate::{FinalAlpha, OutputDestination, RenderConfig, RenderError, RenderedScene, Result};
 
 /// The version of the fixed post-chain order (spec 15.7's "versioned order").
@@ -265,6 +271,16 @@ pub fn create_ui_pipeline(
     (pipeline, layout)
 }
 
+/// A per-frame buffer held until its submission completes, then released (16.7).
+///
+/// wgpu keeps the GPU allocation alive until queued work finishes even after the handle
+/// drops, so the accounting release waits for the fence rather than the handle drop.
+struct PendingBuffer {
+    id: ResourceId,
+    buffer: wgpu::Buffer,
+    serial: u64,
+}
+
 /// The forward renderer: targets, pipelines, resources and the previous submission.
 pub struct Renderer {
     targets: RenderTargets,
@@ -282,6 +298,17 @@ pub struct Renderer {
     output: passes::output::OutputPass,
     /// Monotonic target generation. Incremented only by a successful reallocation.
     generation: u64,
+    /// WP07 accounting. Owned here, consumed by application/export diagnostics (16.4).
+    memory: MemoryManager,
+    /// Memory records for the seven locked target attachments, in `attachment_sizes`
+    /// order.
+    target_ids: Vec<ResourceId>,
+    /// Asset to memory record, so eviction and reload keep one identity per asset.
+    image_ids: BTreeMap<AssetId, ResourceId>,
+    /// Uniform buffers awaiting fence completion.
+    pending_buffers: Vec<PendingBuffer>,
+    /// Frame counter for `last_used_frame`, monotonic since construction.
+    frame_counter: u64,
 }
 
 /// Create a renderer over an already-open device (spec 15.9).
@@ -294,6 +321,16 @@ pub struct Renderer {
 /// `render_scene`. Recorded as a deviation rather than discarded with a `let _ = queue`
 /// inside the body, which would read as a forgotten use.
 ///
+/// # Memory accounting at construction
+///
+/// WP07 registers the seven targets as locked `Critical` records. The manager starts
+/// **unconfigured**: it accounts every byte but its preflight pressure check is inert
+/// (the budget estimate is "unknown"), because 16.4 makes actual allocation errors
+/// authoritative and this signature receives no adapter facts. The integrator calls
+/// [`Renderer::configure_memory`] with the adapter's dedicated VRAM and ids to attach
+/// telemetry and a conservative estimate; until then a GPU OOM surfaces as device loss,
+/// which [`Renderer::notify_device_loss`] handles.
+///
 /// # Errors
 ///
 /// [`RenderError::ZeroExtent`] before anything is allocated, and
@@ -301,12 +338,21 @@ pub struct Renderer {
 /// cannot run. Pipeline and shader failures travel as themselves.
 pub fn create_renderer(device: &Device, _queue: &Queue, config: &RenderConfig) -> Result<Renderer> {
     config.post.validate()?;
+    let memory = MemoryManager::new(
+        MemoryPolicy::default(),
+        MemoryMode::Export,
+        BudgetSource::Unavailable {
+            reason: "telemetry not configured; actual allocation errors are authoritative (16.4)"
+                .to_owned(),
+            estimated_budget: u64::MAX,
+        },
+    )?;
     let targets = RenderTargets::new(device, config.extent, 1)?;
     let frame_layout = resources::frame_layout(device);
     let item_layout = resources::item_layout(device);
     let fullscreen_layout = resources::fullscreen_layout(device);
     let sampler = resources::nearest_sampler(device);
-    Ok(Renderer {
+    let mut renderer = Renderer {
         opaque: passes::opaque::OpaquePass::new(device, &frame_layout, &item_layout)?,
         ordered_2d: passes::ordered_2d::Ordered2dPass::new(device, &frame_layout, &item_layout)?,
         transparent: passes::transparent::TransparentPass::new(
@@ -325,7 +371,14 @@ pub fn create_renderer(device: &Device, _queue: &Queue, config: &RenderConfig) -
         fullscreen_layout,
         sampler,
         generation: 1,
-    })
+        memory,
+        target_ids: Vec::new(),
+        image_ids: BTreeMap::new(),
+        pending_buffers: Vec::new(),
+        frame_counter: 0,
+    };
+    renderer.register_targets()?;
+    Ok(renderer)
 }
 
 impl Renderer {
@@ -351,6 +404,84 @@ impl Renderer {
         &mut self.registry
     }
 
+    /// The memory manager, for diagnostics and reports (16.4, 16.10).
+    pub const fn memory(&self) -> &MemoryManager {
+        &self.memory
+    }
+
+    /// Mutable memory access — pinning export resources, synthetic budgets in tests.
+    pub fn memory_mut(&mut self) -> &mut MemoryManager {
+        &mut self.memory
+    }
+
+    /// Attach a validated policy and live telemetry (16.5's integration step).
+    ///
+    /// Call before uploading images: the new manager starts with an empty table, and a
+    /// registry already holding textures would be resident without records. Targets are
+    /// re-registered into the new manager. A correlation failure is not fatal — the
+    /// source degrades to the conservative estimate (16.6), visible in
+    /// [`MemoryManager::telemetry_status`].
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError::GraphInvalid`] when images are already registered, and
+    /// [`RenderError::Internal`] carrying [`crate::MemoryError::InvalidPolicy`] for a
+    /// policy that fails validation.
+    pub fn configure_memory(
+        &mut self,
+        policy: MemoryPolicy,
+        mode: MemoryMode,
+        dedicated_video_memory: u64,
+        vendor_id: u32,
+        device_id: u32,
+    ) -> Result<()> {
+        if !self.registry.is_empty() {
+            return Err(RenderError::GraphInvalid {
+                stage: "configure_memory".to_owned(),
+                detail: "configure memory before uploading images; the new table cannot adopt \
+                         resident textures it has no records for"
+                    .to_owned(),
+            });
+        }
+        let mut memory = MemoryManager::new(
+            policy,
+            mode,
+            BudgetSource::Unavailable {
+                reason: "DXGI telemetry not yet attached".to_owned(),
+                estimated_budget: dedicated_video_memory * 3 / 4,
+            },
+        )?;
+        #[cfg(feature = "dxgi-telemetry")]
+        memory.attach_dxgi(vendor_id, device_id);
+        #[cfg(not(feature = "dxgi-telemetry"))]
+        let _ = (vendor_id, device_id);
+        self.memory = memory;
+        self.target_ids.clear();
+        self.register_targets()
+    }
+
+    /// Preflight and register the seven target attachments as locked `Critical` records.
+    /// Locked is structural: 16.7's exclusion list then makes "never free live targets"
+    /// a property of the plan rather than a remembered rule.
+    fn register_targets(&mut self) -> Result<()> {
+        for (label, bytes) in self.targets.attachment_sizes() {
+            let permit = self
+                .memory
+                .preflight_allocation(bytes, ResourcePriority::Critical)?;
+            permit.commit();
+            let mut record = ResourceRecord::new(
+                format!("target/{label}"),
+                bytes,
+                ContentSource::Regenerable,
+                ResourcePriority::Critical,
+            )?;
+            record.locked = true;
+            let id = self.memory.register_resource(record)?;
+            self.target_ids.push(id);
+        }
+        Ok(())
+    }
+
     /// The previous submission's state, which `extract_frame` receives.
     #[must_use]
     pub const fn previous_state(&self) -> &PreviousFrameState {
@@ -370,7 +501,19 @@ impl Renderer {
         }
     }
 
-    /// Upload a decoded image. See [`ResourceRegistry::register_image`].
+    /// Upload a decoded image through the memory manager (16.10: disk-backed sources).
+    ///
+    /// Three paths, one identity per asset: a first upload reserves, creates and
+    /// registers; a re-upload of an **evicted** asset reuses its record and confirms the
+    /// reload (16.12's exact-reload clause); a re-upload of a resident asset releases the
+    /// old record and registers a replacement. The permit rolls back on any failure
+    /// before commit.
+    ///
+    /// # Errors
+    ///
+    /// The registry's own refusals (zero extent, malformed pixels), plus
+    /// [`crate::MemoryError::OutOfMemory`] when the budget cannot fit the texture and
+    /// nothing safe remains to evict.
     pub fn register_image(
         &mut self,
         device: &Device,
@@ -379,8 +522,135 @@ impl Renderer {
         image: &anim_assets::DecodedImage,
         configuration: anim_assets::DecoderConfiguration,
     ) -> Result<()> {
+        let bytes = (image.width as u64)
+            .checked_mul(image.height as u64)
+            .and_then(|pixels| pixels.checked_mul(TEXEL_BYTES))
+            .ok_or_else(|| RenderError::internal("register_image", "byte count overflowed"))?;
+        if bytes == 0 {
+            return Err(RenderError::ZeroExtent {
+                width: image.width,
+                height: image.height,
+            });
+        }
+        let existing = self.image_ids.get(&asset).copied();
+        let reload = existing.filter(|&id| {
+            self.memory
+                .table()
+                .get(id)
+                .is_some_and(|record| !record.resident)
+        });
+        if reload.is_none() {
+            if let Some(old) = existing {
+                self.memory.release_resource(old);
+            }
+        }
+        let permit = self
+            .memory
+            .preflight_allocation(bytes, ResourcePriority::Cache)?;
+        self.execute_eviction_plan(permit.plan())?;
         self.registry
-            .register_image(device, queue, asset, image, configuration)
+            .register_image(device, queue, asset, image, configuration)?;
+        permit.commit();
+        let id = if let Some(id) = reload {
+            self.memory.confirm_reloaded(id)?;
+            id
+        } else {
+            let record = ResourceRecord::new(
+                format!("image/{}", asset.to_canonical_string()),
+                bytes,
+                ContentSource::Disk(asset),
+                ResourcePriority::Cache,
+            )?;
+            self.memory.register_resource(record)?
+        };
+        self.image_ids.insert(asset, id);
+        Ok(())
+    }
+
+    /// Evict one asset's texture, keeping its memory record for reload (16.7).
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError::TextureNotRegistered`] when the asset has no upload, and the
+    /// memory layer's [`crate::MemoryError::EvictionIneligible`] (as
+    /// [`RenderError::Internal`]) when the record is required, in flight, locked or
+    /// mapped — the exclusion is re-checked at execution, not trusted from a plan.
+    pub fn evict_image(&mut self, asset: &AssetId) -> Result<()> {
+        let Some(&id) = self.image_ids.get(asset) else {
+            return Err(RenderError::TextureNotRegistered {
+                asset: asset.to_canonical_string(),
+            });
+        };
+        // Known completions become known by draining; without this, a texture whose
+        // frame finished between renders still looks in-flight (16.7). The explicit
+        // eviction also releases the last frame's required claim on the asset.
+        self.memory.drain_completions();
+        self.memory.remove_required(id);
+        self.registry.remove_image(asset);
+        self.memory.apply_eviction(&[id])?;
+        Ok(())
+    }
+
+    /// The memory record for an uploaded asset, if any.
+    #[must_use]
+    pub fn image_memory_id(&self, asset: &AssetId) -> Option<ResourceId> {
+        self.image_ids.get(asset).copied()
+    }
+
+    /// Execute an eviction plan: drop the GPU handles, then transition the records.
+    /// Entries the world has moved on from (now required, in flight or locked) are
+    /// skipped rather than forced — 16.11's exclusions bind at execution time.
+    fn execute_eviction_plan(&mut self, plan: &EvictionPlan) -> Result<()> {
+        if plan.is_empty() {
+            return Ok(());
+        }
+        self.memory.drain_completions();
+        let completed = self.memory.completed_serial();
+        let required = self.memory.required().clone();
+        let mut ids = Vec::new();
+        let mut assets = Vec::new();
+        for entry in &plan.entries {
+            let evictable = self
+                .memory
+                .table()
+                .get(entry.id)
+                .is_some_and(|record| record.evictable(&required, completed));
+            if !evictable {
+                continue;
+            }
+            if let Some((&asset, _)) = self.image_ids.iter().find(|(_, &id)| id == entry.id) {
+                assets.push(asset);
+            }
+            ids.push(entry.id);
+        }
+        for asset in &assets {
+            self.registry.remove_image(asset);
+        }
+        self.memory.apply_eviction(&ids)?;
+        Ok(())
+    }
+
+    /// Release per-frame buffers whose submissions have completed (16.7).
+    fn release_completed_buffers(&mut self) {
+        let completed = self.memory.completed_serial();
+        let mut pending = Vec::new();
+        for entry in self.pending_buffers.drain(..) {
+            if entry.serial <= completed {
+                self.memory.release_resource(entry.id);
+                drop(entry.buffer);
+            } else {
+                pending.push(entry);
+            }
+        }
+        self.pending_buffers = pending;
+    }
+
+    /// Drain known completions and release the buffers they free. The export loop calls
+    /// this at frame end; `render_scene` also drains at frame start, so a caller that
+    /// never calls this still releases one frame late rather than never.
+    pub fn release_completed_work(&mut self) {
+        self.memory.drain_completions();
+        self.release_completed_buffers();
     }
 
     /// Reallocate every target at a new extent (spec 15.9, 15.11).
@@ -392,6 +662,8 @@ impl Renderer {
     ///
     /// Old views stay alive until queued GPU work no longer references them, which is wgpu's
     /// reference count doing 15.8's job rather than a fence this crate would have to own.
+    /// The old generation's accounting releases at the swap; under telemetry the observed
+    /// usage still covers the in-flight bytes (16.4's advisory/authoritative split).
     pub fn resize(&mut self, device: &Device, extent: Extent3d) -> Result<()> {
         if extent.width == 0 || extent.height == 0 {
             return Err(RenderError::ZeroExtent {
@@ -403,9 +675,33 @@ impl Renderer {
             return Ok(());
         }
         let next = self.generation.saturating_add(1);
+        // Preflight the whole new generation before creating anything, so a budget
+        // refusal leaves the previous generation current and accounted.
+        let mut permits = Vec::new();
+        for (label, bytes) in targets::attachment_sizes(extent) {
+            let permit = self
+                .memory
+                .preflight_allocation(bytes, ResourcePriority::Critical)?;
+            permits.push((label, bytes, permit));
+        }
         let targets = RenderTargets::new(device, extent, next)?;
+        for id in self.target_ids.drain(..) {
+            self.memory.release_resource(id);
+        }
         self.targets = targets;
         self.generation = next;
+        for (label, bytes, permit) in permits {
+            permit.commit();
+            let mut record = ResourceRecord::new(
+                format!("target/{label}"),
+                bytes,
+                ContentSource::Regenerable,
+                ResourcePriority::Critical,
+            )?;
+            record.locked = true;
+            let id = self.memory.register_resource(record)?;
+            self.target_ids.push(id);
+        }
         // 15.7: target resize invalidates history. The generation change is what
         // `HistoryState::detect` reads, so nothing else has to be marked here.
         Ok(())
@@ -413,9 +709,22 @@ impl Renderer {
 
     /// Invalidate history and drop GPU resources after device loss (spec 15.11).
     pub fn invalidate_after_device_loss(&mut self) {
+        self.notify_device_loss("renderer invalidated after device loss");
+    }
+
+    /// Device loss with the driver's reason (16.7, 16.11): history, registry, residency
+    /// records and serial assumptions all die. The caller owns the wiring —
+    /// `GpuContext::loss()` is the authority, and the render loop checks it each frame;
+    /// reconstruction is a fresh [`create_renderer`] on the recovered device plus
+    /// re-uploads from CPU/disk, which is why this method clears rather than rebuilds.
+    pub fn notify_device_loss(&mut self, reason: &str) {
         self.previous.history.invalidate_for_device_loss();
         self.previous.transforms.clear();
         self.registry.clear();
+        self.memory.on_device_loss(reason);
+        self.image_ids.clear();
+        self.target_ids.clear();
+        self.pending_buffers.clear();
     }
 
     /// Draw a frame and read back or hand over the clean output (spec 15.9).
@@ -439,6 +748,56 @@ impl Renderer {
                 ),
             });
         }
+        // WP07's frame boundary: drain known completions, release the buffers they free,
+        // name the current frame's required set, and let the hysteresis streak decide
+        // whether pressure earns an eviction pass (16.6, 16.7).
+        self.release_completed_work();
+        let serial = self.memory.begin_submission()?;
+        self.frame_counter = self.frame_counter.saturating_add(1);
+        let mut required: BTreeSet<ResourceId> = self.target_ids.iter().copied().collect();
+        for item in &frame.items {
+            if let Some(&id) = self.image_ids.get(&item.asset) {
+                required.insert(id);
+            }
+        }
+        self.memory.set_required(required);
+        if let Some(plan) = self.memory.pressure_eviction_plan()? {
+            self.execute_eviction_plan(&plan)?;
+        }
+        let result = self.render_frame_inner(device, queue, frame, serial);
+        if result.is_err() {
+            self.abort_frame(serial);
+        }
+        result
+    }
+
+    /// A failed frame releases the buffers it registered and rolls back its serial when
+    /// unsubmitted, so neither the accounting nor the fence order carries a ghost. A
+    /// serial already submitted keeps its place — its completion callback is still coming.
+    fn abort_frame(&mut self, serial: u64) {
+        let mut keep = Vec::new();
+        for entry in self.pending_buffers.drain(..) {
+            if entry.serial == serial {
+                self.memory.release_resource(entry.id);
+                drop(entry.buffer);
+            } else {
+                keep.push(entry);
+            }
+        }
+        self.pending_buffers = keep;
+        self.memory.abort_submission(serial);
+    }
+
+    /// Encode and submit one frame. The caller owns the serial assignment and the
+    /// failure cleanup; this body is WP06's pass sequence with WP07's buffer accounting.
+    fn render_frame_inner(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        frame: &RenderFrame,
+        serial: u64,
+    ) -> Result<RenderedScene> {
+        let extent = self.targets.extent;
         let camera = CameraFrame {
             view: glam::Mat4::IDENTITY,
             projection: frame.camera.current_view_proj,
@@ -452,7 +811,27 @@ impl Renderer {
             history_valid: if frame.history_valid { 1.0 } else { 0.0 },
             _pad: 0.0,
         };
+        let scene_bytes = size_of::<SceneUniform>() as u64;
+        let permit = self
+            .memory
+            .preflight_allocation(scene_bytes, ResourcePriority::CurrentFrame)?;
+        self.execute_eviction_plan(permit.plan())?;
         let scene_buffer = resources::scene_buffer(device, &scene_uniform);
+        permit.commit();
+        let mut record = ResourceRecord::new(
+            "frame/scene_uniform",
+            scene_bytes,
+            ContentSource::Regenerable,
+            ResourcePriority::CurrentFrame,
+        )?;
+        record.last_used_serial = serial;
+        record.last_used_frame = self.frame_counter;
+        let scene_id = self.memory.register_resource(record)?;
+        self.pending_buffers.push(PendingBuffer {
+            id: scene_id,
+            buffer: scene_buffer.clone(),
+            serial,
+        });
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("anim_render/frame_bg"),
             layout: &self.frame_layout,
@@ -466,7 +845,7 @@ impl Renderer {
         let mut ordered = Vec::new();
         let mut transparent = Vec::new();
         for item in &frame.items {
-            let bound = self.bind_item(device, item)?;
+            let bound = self.bind_item(device, item, serial)?;
             match item.pass {
                 PassKind::Opaque => opaque.push(bound),
                 PassKind::Ordered2d => ordered.push(bound),
@@ -549,6 +928,10 @@ impl Renderer {
 
         let command_buffer = encoder.finish();
         queue.submit([command_buffer]);
+        // 16.7: the serial is recorded at submission, and the completion callback feeds
+        // the fence tracker through the manager's channel (#44 ruling 8).
+        self.memory.on_submitted(serial);
+        queue.on_submitted_work_done(self.memory.submission_callback(serial));
 
         // Only now: 15.7's "previous transforms update only after successful submission".
         self.previous.history.commit_submission(
@@ -561,13 +944,7 @@ impl Renderer {
         );
         self.previous.record(frame);
 
-        let output = OutputDestination::Readback(readback::read_texture(
-            device,
-            queue,
-            &self.targets.scene_output,
-            extent,
-            wgpu::TextureFormat::Rgba8Unorm,
-        )?);
+        let output = OutputDestination::Readback(self.read_output_tracked(device, queue)?);
         Ok(RenderedScene {
             output,
             generation: self.generation,
@@ -577,9 +954,22 @@ impl Renderer {
     }
 
     /// Build one item's bind group, checking the decode/blend pairing on the way.
-    fn bind_item(&self, device: &Device, item: &DrawItem) -> Result<BoundItem> {
-        let image = self.registry.image(&item.asset)?;
-        if crate::alpha::expects_premultiplied(item.alpha_mode) != image.premultiplied {
+    fn bind_item(&mut self, device: &Device, item: &DrawItem, serial: u64) -> Result<BoundItem> {
+        // Copy the image facts out so the registry borrow ends before the memory
+        // manager's &mut self calls below.
+        let (image_view, image_extent, premultiplied, configuration) = {
+            let image = self.registry.image(&item.asset)?;
+            (
+                image.view.clone(),
+                image.extent,
+                image.premultiplied,
+                image.configuration,
+            )
+        };
+        if let Some(&id) = self.image_ids.get(&item.asset) {
+            self.memory.mark_used(id, serial, self.frame_counter);
+        }
+        if crate::alpha::expects_premultiplied(item.alpha_mode) != premultiplied {
             return Err(RenderError::GraphInvalid {
                 stage: "bind_item".to_owned(),
                 detail: format!(
@@ -591,7 +981,7 @@ impl Renderer {
                         "straight"
                     },
                     item.asset.to_canonical_string(),
-                    image.configuration.as_str(),
+                    configuration.as_str(),
                 ),
             });
         }
@@ -601,7 +991,7 @@ impl Renderer {
             tint: [1.0, 1.0, 1.0, item.opacity],
             params: [
                 item.alpha_mode.alpha_test_cutoff().unwrap_or(0.0),
-                if crate::alpha::premultiply_for(item.alpha_mode, image.premultiplied) {
+                if crate::alpha::premultiply_for(item.alpha_mode, premultiplied) {
                     1.0
                 } else {
                     0.0
@@ -610,12 +1000,32 @@ impl Renderer {
                 if item.previous_valid { 1.0 } else { 0.0 },
             ],
             half_size: [
-                image.extent.width as f32 * 0.5,
-                image.extent.height as f32 * 0.5,
+                image_extent.width as f32 * 0.5,
+                image_extent.height as f32 * 0.5,
             ],
             _pad2: [0.0; 2],
         };
+        let item_bytes = size_of::<ItemUniform>() as u64;
+        let permit = self
+            .memory
+            .preflight_allocation(item_bytes, ResourcePriority::CurrentFrame)?;
+        self.execute_eviction_plan(permit.plan())?;
         let buffer = resources::item_buffer(device, &uniform);
+        permit.commit();
+        let mut record = ResourceRecord::new(
+            format!("frame/item/{}", item.asset.to_canonical_string()),
+            item_bytes,
+            ContentSource::Regenerable,
+            ResourcePriority::CurrentFrame,
+        )?;
+        record.last_used_serial = serial;
+        record.last_used_frame = self.frame_counter;
+        let id = self.memory.register_resource(record)?;
+        self.pending_buffers.push(PendingBuffer {
+            id,
+            buffer: buffer.clone(),
+            serial,
+        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("anim_render/item_bg"),
             layout: &self.item_layout,
@@ -626,7 +1036,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&image.view),
+                    resource: wgpu::BindingResource::TextureView(&image_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -659,14 +1069,46 @@ impl Renderer {
     }
 
     /// Read the clean output back without drawing again, for a golden comparison.
-    pub fn read_output(&self, device: &Device, queue: &Queue) -> Result<OutputReadback> {
-        readback::read_texture(
+    pub fn read_output(&mut self, device: &Device, queue: &Queue) -> Result<OutputReadback> {
+        self.read_output_tracked(device, queue)
+    }
+
+    /// Readback with staging accounting (16.5: register every owned buffer).
+    ///
+    /// The staging buffer is reserved before the copy and released after it: the copy is
+    /// synchronous (`read_texture` polls its own submission and unmaps before returning),
+    /// so the mapped window never outlives this call and the record cannot become an
+    /// eviction candidate while mapped. The internal copy submission takes no fence
+    /// serial for the same reason — nothing it owns survives the call to be evicted
+    /// later. Recorded as a deviation from 16.7's "every queue submission" with that
+    /// reasoning; scene submissions, whose resources outlive the call, all take serials.
+    fn read_output_tracked(&mut self, device: &Device, queue: &Queue) -> Result<OutputReadback> {
+        let extent = self.targets.extent;
+        let bytes = readback::staging_size(extent, 4);
+        let permit = self
+            .memory
+            .preflight_allocation(bytes, ResourcePriority::CurrentFrame)?;
+        self.execute_eviction_plan(permit.plan())?;
+        let result = readback::read_texture(
             device,
             queue,
             &self.targets.scene_output,
-            self.targets.extent,
+            extent,
             wgpu::TextureFormat::Rgba8Unorm,
-        )
+        );
+        let output = result?;
+        permit.commit();
+        let mut record = ResourceRecord::new(
+            "readback/staging",
+            bytes,
+            ContentSource::Regenerable,
+            ResourcePriority::CurrentFrame,
+        )?;
+        record.mapped = true;
+        let id = self.memory.register_resource(record)?;
+        self.memory.set_mapped(id, false)?;
+        self.memory.release_resource(id);
+        Ok(output)
     }
 }
 

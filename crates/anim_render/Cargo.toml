@@ -20,14 +20,20 @@ publish.workspace = true
 #   17(a) records for `anim_sim`. What 15.4 actually prohibits — that `anim_render`
 #   never depends on `anim_export` or `anim_editor` — holds.
 #
-# `ash` is deliberately absent. DECISIONS.md #40 ruling 1 closes ADR-0002
-# consequence 6: the PCI anchor comes from `wgpu::AdapterInfo::device_pci_bus_id`,
-# which wgpu-hal populates from `VK_EXT_pci_bus_info`, so production needs no raw
-# Vulkan dependency and opens no second `VkInstance`.
+# `ash` is deliberately absent from the unconditional dependencies. DECISIONS.md #40
+# ruling 1 closes ADR-0002 consequence 6 for `device.rs`: the PCI anchor comes from
+# `wgpu::AdapterInfo::device_pci_bus_id`, which wgpu-hal populates from
+# `VK_EXT_pci_bus_info`, so the selection path needs no raw Vulkan dependency and opens
+# no second `VkInstance`. WP07 reopens the narrow half #43 ruling 1 names: budget
+# attribution needs the Vulkan LUID, wgpu 30 exposes none, so `ash` enters **behind
+# `dxgi-telemetry`** for one once-per-process correlation instance (`memory/identity.rs`).
+# The `linked` feature stays off — no VULKAN_SDK on this machine (BUILD_STATE).
 #
-# `windows` is target-gated per 15.4 and used for one thing: `IDXGIAdapter1::GetDesc1`'s
-# `DedicatedVideoMemory`, the floor #18 decision 2 requires and #40 ruling 5 shapes.
-# LUID correlation and the memory *budget* stay WP07's.
+# `windows` is target-gated per 15.4 and used for `IDXGIAdapter1::GetDesc1`'s
+# `DedicatedVideoMemory` (the floor #18 decision 2 requires) and, behind the same
+# feature, `IDXGIAdapter3::QueryVideoMemoryInfo` (WP07). All budget types live in
+# `Win32::Graphics::Dxgi`; the workspace feature set was verified against windows-0.62.2
+# by the WP00 probe that queried both segments.
 [dependencies]
 anim_core = { path = "../anim_core" }
 anim_assets = { path = "../anim_assets" }
@@ -40,9 +46,15 @@ bytemuck = { workspace = true }
 half = { workspace = true }
 glam = { workspace = true }
 thiserror = { workspace = true }
+ash = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+[features]
+default = ["dxgi-telemetry"]
+# Spec 5.2: default on Windows; internal accounting remains available without it.
+dxgi-telemetry = ["dep:ash"]
 
 [dev-dependencies]
 # 15.4's prohibition is on the *consumers* — `anim_export` and `anim_editor` — and

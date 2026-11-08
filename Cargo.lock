@@ -26,6 +26,9 @@ dependencies = [
 [[package]]
 name = "anim_app"
 version = "0.0.0"
+dependencies = [
+ "anim_render",
+]
 
 [[package]]
 name = "anim_assets"
@@ -95,6 +98,7 @@ dependencies = [
  "anim_assets",
  "anim_core",
  "anim_project",
+ "anim_render",
  "anim_sim",
  "uuid",
 ]
@@ -121,6 +125,7 @@ dependencies = [
  "anim_project",
  "anim_scene",
  "anim_sim",
+ "ash",
  "bytemuck",
  "glam",
  "half",
@@ -166,6 +171,7 @@ dependencies = [
  "anim_core",
  "anim_headless",
  "anim_project",
+ "anim_render",
  "anim_scene",
  "anim_sim",
  "anyhow",

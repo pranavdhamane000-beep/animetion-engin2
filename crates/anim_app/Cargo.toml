@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# WP07: `src/settings.rs` (spec 16.3) validates the memory policy before it reaches the
+# renderer, so the app needs the policy types. Composition arrives in WP10; a library
+# target beside the binary keeps the validated settings reachable and testable without
+# the stub main referencing them (the same shape anim_headless gained in WP05).
 [dependencies]
+anim_render = { path = "../anim_render" }
 
 [lints]
 workspace = true
