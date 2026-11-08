@@ -231,10 +231,11 @@ mod tests {
             // The number the report prints is `document.schema_version`, so this expectation
             // moves whenever the document format does — which is the point of asserting it
             // rather than omitting it. It moved 3 -> 4 with WP06's per-asset colour and alpha
-            // claims (DECISIONS.md #40 ruling 2), and the report line itself is unchanged:
-            // a format bump is a fact about the document, not about this text's layout. The
+            // claims (DECISIONS.md #40 ruling 2) and 4 -> 5 with WP08's per-scene audio clips
+            // (DECISIONS.md #46 ruling 1), and the report line itself is unchanged: a format
+            // bump is a fact about the document, not about this text's layout. The
             // `wp05-replay/1` tag above is the report's own version and did not move.
-            "schema_version 4",
+            "schema_version 5",
             "ticks_per_frame 2",
             "simulation_rate 48/1",
             "seed 2a",

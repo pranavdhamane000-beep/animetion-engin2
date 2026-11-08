@@ -29,7 +29,7 @@ use std::sync::Arc;
 use anim_core::id::{NodeId, SceneId};
 use anim_core::rational::Rational;
 use anim_core::time::{FramePos, FrameRate};
-use anim_project::{EventKind, NodeData, ProjectDocument, SceneData};
+use anim_project::{AudioClip, EventKind, NodeData, ProjectDocument, SceneData};
 
 use crate::animation::{self, blend_layers, PropertySources};
 use crate::camera::{self, EvaluatedCamera};
@@ -133,6 +133,12 @@ fn evaluate_scene(
     let cameras: Arc<[EvaluatedCamera]> = camera::evaluate(&cuts, &worlds, &position)?.into();
     let audio_cues = audio_cues_from(&events, &evaluated);
 
+    // WP08's clips are full-timeline and position-independent: every authored clip is
+    // exposed at every position, unlike `audio_cues`, which is the per-frame event view.
+    // The evaluated clip is the authored clip — immutable exposure, no per-position
+    // computation — so this is a clone of the scene's collection in id order.
+    let audio_clips: Arc<[AudioClip]> = scene.audio_clips().cloned().collect::<Vec<_>>().into();
+
     // Step 7, in 13.5's numbering: what simulation may read.
     let simulation_inputs: Arc<[SimulationInput]> = evaluated
         .iter()
@@ -164,6 +170,7 @@ fn evaluate_scene(
         audio_cues,
         simulation_inputs,
         events: events.into(),
+        audio_clips,
     })
 }
 
@@ -289,8 +296,8 @@ mod tests {
     use super::*;
     use anim_core::id::{EventDefinitionId, ProjectId, Revision, TrackId};
     use anim_project::{
-        Easing, EventDefinition, NodeData, PropertyCurve, PropertyKey, PropertyPath, PropertyValue,
-        TrackData,
+        AudioClip, ChannelLayout, Easing, EventDefinition, NodeData, PropertyCurve, PropertyKey,
+        PropertyPath, PropertyValue, TrackData,
     };
     use uuid::Uuid;
 
@@ -348,7 +355,7 @@ mod tests {
         tracks: Vec<TrackData>,
         events: Vec<EventDefinition>,
     ) -> ProjectDocument {
-        let scene = SceneData::from_parts("shot01", nodes, tracks, [], events).unwrap();
+        let scene = SceneData::from_parts("shot01", nodes, tracks, [], events, []).unwrap();
         let mut out = ProjectDocument::new(ProjectId::derive(&namespace(), b"p"), rate);
         assert!(
             out.insert_scene(scene_id(), scene).is_none(),
@@ -680,5 +687,45 @@ mod tests {
         };
         assert_eq!(position, "4");
         assert!(detail.contains("switches at a key"), "{detail}");
+    }
+
+    #[test]
+    fn an_authored_audio_clip_is_full_timeline_not_per_frame() {
+        // WP08's clips reach the snapshot at every position, unlike audio_cues, which fire
+        // only in their frame. A clip spanning frames 2..6 is present at frame 0 (before it
+        // starts) and frame 100 (after it ends), proving the exposure is position-independent
+        // and that the mixer, not the evaluator, decides what intersects the export range.
+        let clip = AudioClip::new(
+            TrackId::derive(&namespace(), b"music"),
+            anim_core::id::AssetId::derive(&namespace(), b"score"),
+            FramePos::at_frame(2),
+            FramePos::at_frame(6),
+            Rational::from_i128(0),
+            false,
+            Rational::from_i128(1),
+            Rational::from_i128(0),
+            Rational::from_i128(0),
+            false,
+            ChannelLayout::Stereo,
+        );
+        let mut doc = document(vec![hero()], vec![]);
+        doc.scene_mut(&scene_id())
+            .unwrap()
+            .insert_audio_clip(clip.clone())
+            .unwrap();
+
+        for frame in [0, 100] {
+            let snapshot = evaluate_at(&doc, FramePos::at_frame(frame));
+            assert_eq!(
+                snapshot.audio_clips.len(),
+                1,
+                "frame {frame} carries the clip"
+            );
+            assert_eq!(snapshot.audio_clips[0], clip);
+            assert!(
+                snapshot.audio_cues.is_empty(),
+                "and no cue fires: a clip is a timeline range, not a per-frame event"
+            );
+        }
     }
 }

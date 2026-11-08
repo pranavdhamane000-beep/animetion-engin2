@@ -47,20 +47,22 @@ pub struct MigrationStep {
 /// The migration chain from any supported version to
 /// [`PROJECT_SCHEMA_VERSION`].
 ///
-/// Three steps. Version 1 is WP03's shape and is on disk in every project saved before WP04,
+/// Four steps. Version 1 is WP03's shape and is on disk in every project saved before WP04,
 /// which added the event section spec 13.5 step 1 validates and 13.7 orders. Version 2 is
 /// WP04's and is on disk in every project saved before WP05, which added the simulation
 /// section spec 14.2 makes a prerequisite. Version 3 is WP05's and is on disk in every
 /// project saved before WP06, which added the image colour and alpha claims spec 15.2
-/// makes a prerequisite. Spec 12.5's step 9 asks for a step per version pair and a fixture
-/// per version, and all three have both: `V1_TO_V2` with `tests/fixtures/project_v1.anim.json`,
-/// `V2_TO_V3` with `tests/fixtures/project_v2.anim.json`, `V3_TO_V4` with
-/// `tests/fixtures/project_v3.anim.json`.
+/// makes a prerequisite. Version 4 is WP06's and is on disk in every project saved before
+/// WP08, which added the per-scene audio-clip section spec 17.2 makes a prerequisite. Spec
+/// 12.5's step 9 asks for a step per version pair and a fixture per version, and all four
+/// have both: `V1_TO_V2` with `tests/fixtures/project_v1.anim.json`, `V2_TO_V3` with
+/// `tests/fixtures/project_v2.anim.json`, `V3_TO_V4` with `tests/fixtures/project_v3.anim.json`,
+/// `V4_TO_V5` with `tests/fixtures/project_v4.anim.json`.
 pub const fn chain() -> &'static [MigrationStep] {
     CHAIN
 }
 
-const CHAIN: &[MigrationStep] = &[V1_TO_V2, V2_TO_V3, V3_TO_V4];
+const CHAIN: &[MigrationStep] = &[V1_TO_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5];
 
 /// The version 1 to version 2 step.
 ///
@@ -111,6 +113,20 @@ const V3_TO_V4: MigrationStep = MigrationStep {
     description: "v3 to v4: give every embedded asset record the `image` colour and alpha claims \
                   version 3 did not have, and the embedded manifest with them",
     apply: add_image_claims,
+};
+
+/// The version 4 to version 5 step.
+///
+/// Frozen history like the three before it, with literal ends for [`V1_TO_V2`]'s reason: a
+/// step written against the current number would silently change what it claims to read
+/// the moment a version 6 exists. Its shape is [`V1_TO_V2`]'s — one empty section per scene
+/// — because a version 4 project recorded no audio clips anywhere, so the only honest
+/// filling is an empty collection, not invented clips.
+const V4_TO_V5: MigrationStep = MigrationStep {
+    from: 4,
+    to: 5,
+    description: "v4 to v5: give every scene the `audio_clips` section version 4 did not have",
+    apply: add_audio_clips_section,
 };
 
 /// Give every scene in a version 1 document the empty event section version 2 requires.
@@ -241,6 +257,42 @@ fn claims_for_record(members: &serde_json::Map<String, Value>) -> Value {
     } else {
         Value::Null
     }
+}
+
+/// Give every scene in a version 4 document the empty audio-clip section version 5 requires.
+///
+/// Total in the sense [`MigrationStep`] promises: it writes `schema_version` and adds one
+/// member per scene, and rewrites nothing else. It is also idempotent — a scene that already
+/// has the section keeps it, because the chain may legitimately run over a file a person
+/// edited toward version 5 by hand, and discarding the clips they added would be data loss
+/// dressed up as a migration. The filling is empty for the reason [`add_events_section`]'s
+/// is: a version 4 project recorded no clips, so inventing any would be authoring data the
+/// file's owner never wrote.
+///
+/// A document with no `scenes` member is left alone here rather than refused: it is not a
+/// version problem, and the typed parse that follows reports it as the malformed document
+/// it is.
+fn add_audio_clips_section(value: &mut Value) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| ProjectError::MigrationFailure {
+            from: 4,
+            to: 5,
+            detail: "a version 4 document is not a JSON object, so there is no scene map to \
+                 add a section to"
+                .to_string(),
+        })?;
+    if let Some(Value::Object(scenes)) = object.get_mut("scenes") {
+        for scene in scenes.values_mut() {
+            if let Some(members) = scene.as_object_mut() {
+                members
+                    .entry("audio_clips".to_string())
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            }
+        }
+    }
+    object.insert("schema_version".to_string(), Value::from(5u32));
+    Ok(())
 }
 
 /// Refuse a document version this build cannot interpret.
@@ -455,16 +507,16 @@ pub fn load_document_with_chain(bytes: &[u8], steps: &[MigrationStep]) -> Result
 /// A test-only chain, from a version 0 that never existed all the way to
 /// [`PROJECT_SCHEMA_VERSION`].
 ///
-/// Four steps, and the last three are the real ones: `V1_TO_V2`, `V2_TO_V3` then
-/// `V3_TO_V4`. That is deliberate. A test that starts at the synthetic version 0 walks the
+/// Five steps, and the last four are the real ones: `V1_TO_V2`, `V2_TO_V3`, `V3_TO_V4` then
+/// `V4_TO_V5`. That is deliberate. A test that starts at the synthetic version 0 walks the
 /// synthetic rename and then every production step, so `migrate_json`'s multi-step loop, the
 /// "chain finished but reports another version" guard, the real `events` rewrite, the real
-/// `simulation` rewrite and the real record-claims rewrite are all on the same path a user's
-/// version 1 file will take — and with three real steps in the chain, a step that writes this
-/// build's number instead of the version it produces is now a defect the loop can actually
-/// catch in more than one place.
+/// `simulation` rewrite, the real record-claims rewrite and the real audio-clip rewrite are
+/// all on the same path a user's version 1 file will take — and with four real steps in the
+/// chain, a step that writes this build's number instead of the version it produces is now a
+/// defect the loop can actually catch in more than one place.
 #[cfg(test)]
-pub(crate) const TEST_CHAIN: &[MigrationStep] = &[V0_TO_V1, V1_TO_V2, V2_TO_V3, V3_TO_V4];
+pub(crate) const TEST_CHAIN: &[MigrationStep] = &[V0_TO_V1, V1_TO_V2, V2_TO_V3, V3_TO_V4, V4_TO_V5];
 
 /// The synthetic first step. Version 0 is not a shape this project ever wrote; it exists
 /// so that a chain of length two is what the tests run.
@@ -644,6 +696,10 @@ mod tests {
         committed_fixture(3)
     }
 
+    fn version_four_fixture() -> Vec<u8> {
+        committed_fixture(4)
+    }
+
     /// The same hand-written document with two embedded asset records: one image, one
     /// not.
     ///
@@ -797,6 +853,54 @@ mod tests {
             anim_assets::MANIFEST_SCHEMA_VERSION,
             "the embedded collection's version moved with it, which is what makes the \
              migrated file loadable at all"
+        );
+    }
+
+    #[test]
+    fn a_committed_version_4_file_loads_through_the_real_chain() {
+        let document = load_document(&version_four_fixture()).expect("a v4 file migrates to v5");
+        assert_eq!(document.schema_version, PROJECT_SCHEMA_VERSION);
+        // What version 4 itself carried must survive, or the chain rewrites WP06 instead of
+        // adding to it.
+        let scene = document
+            .scenes
+            .values()
+            .next()
+            .expect("the fixture has one scene");
+        assert_eq!(scene.name, "shot01");
+        assert_eq!(scene.nodes().count(), 2);
+        assert_eq!(scene.tracks().count(), 1);
+        assert_eq!(scene.markers().len(), 2);
+        assert_eq!(
+            scene.events().count(),
+            2,
+            "the v2 era's events are still there"
+        );
+        assert_eq!(
+            scene.audio_clips().count(),
+            0,
+            "a version 4 file had no audio clips, and adding the section must not add data"
+        );
+        assert_eq!(document.revision, anim_core::id::Revision(9));
+        assert_eq!(
+            document.simulation,
+            crate::simulation::SimulationSettings::for_new_document(),
+            "and the simulation section the file already carried is untouched"
+        );
+        assert_eq!(
+            document.assets.schema_version(),
+            anim_assets::MANIFEST_SCHEMA_VERSION,
+            "the embedded manifest is already at version 2 in a v4 file, so this step does \
+             not touch it"
+        );
+        let cel = anim_core::id::AssetId::parse("66666666-6666-5666-8666-666666666666").unwrap();
+        assert_eq!(
+            document.assets.get(&cel).unwrap().image,
+            Some(anim_assets::ImageAssetClaims {
+                color_space: anim_assets::ImageColorSpace::Srgb,
+                alpha: anim_assets::ImageAlpha::Straight,
+            }),
+            "the image claims a v4 file already recorded survive the step that only adds clips"
         );
     }
 
@@ -1018,6 +1122,61 @@ mod tests {
     }
 
     #[test]
+    fn the_v4_step_adds_the_section_and_rewrites_nothing_else() {
+        // The totality [`MigrationStep`] promises, checked against the committed file:
+        // every member that existed before is the same value afterwards, and the only
+        // additions are one empty `audio_clips` object per scene and the version number.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&version_four_fixture()).expect("the v4 fixture parses");
+        let snapshot = value.clone();
+        migrate_json(&mut value, 4, 5, &[V4_TO_V5]).expect("the single step runs");
+
+        assert_eq!(snapshot["schema_version"], serde_json::json!(4));
+        assert_eq!(
+            value["schema_version"],
+            serde_json::json!(5),
+            "the step writes the version it produces, not this build's number"
+        );
+        for key in [
+            "project_id",
+            "revision",
+            "frame_rate",
+            "assets",
+            "simulation",
+        ] {
+            assert_eq!(snapshot[key], value[key], "{key} was rewritten");
+        }
+
+        let scenes_before = snapshot["scenes"].as_object().unwrap();
+        let scenes_after = value["scenes"].as_object().unwrap();
+        assert_eq!(scenes_before.len(), scenes_after.len());
+        for (id, scene_before) in scenes_before {
+            let scene_after = &scenes_after[id];
+            let clips = scene_after
+                .get("audio_clips")
+                .expect("the step added the section to this scene");
+            assert_eq!(clips, &serde_json::json!({}));
+            for (member, field) in scene_before.as_object().unwrap() {
+                assert_eq!(
+                    &scene_after[member], field,
+                    "scene member {member} was rewritten by a step that only adds"
+                );
+            }
+            assert_eq!(
+                scene_after.as_object().unwrap().len(),
+                scene_before.as_object().unwrap().len() + 1,
+                "the section is the only thing this step adds"
+            );
+        }
+
+        // Idempotent: a second pass over the migrated value changes nothing, so a file a
+        // person moved toward version 5 by hand keeps the clips they wrote.
+        let once = value.clone();
+        migrate_json(&mut value, 4, 5, &[V4_TO_V5]).expect("the step runs again");
+        assert_eq!(value, once, "the step is idempotent");
+    }
+
+    #[test]
     fn a_version_1_file_is_not_readable_as_version_2_without_the_step() {
         // The strictness rule, proven from the other side. `SceneData`'s `Deserialize` has
         // no `serde(default)` on `events`, so an unmigrated version 1 file is refused
@@ -1055,6 +1214,28 @@ mod tests {
         // version — it still refuses rather than reading the missing section as zero ticks.
         assert!(matches!(
             load_document_with_chain(&bytes, &[V1_TO_V2]),
+            Err(ProjectError::MigrationFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn a_version_4_file_is_not_readable_as_version_5_without_the_step() {
+        // The strictness rule a fourth time: `audio_clips` has no `serde(default)`, so a
+        // version 4 scene cannot be loaded by a build that skipped `V4_TO_V5`, and the
+        // missing section is never filled in at the parse boundary with an empty default.
+        let bytes = version_four_fixture();
+        assert!(matches!(
+            load_document_with_chain(&bytes, &[]),
+            Err(ProjectError::MigrationFailure { .. })
+        ));
+        assert!(
+            serde_json::from_slice::<ProjectDocument>(&bytes).is_err(),
+            "and the refusal is in the typed parse, not only in the chain"
+        );
+        // A chain that stops short — the steps that exist but do not reach this version —
+        // still refuses rather than reading the missing section as no clips.
+        assert!(matches!(
+            load_document_with_chain(&bytes, &[V1_TO_V2, V2_TO_V3, V3_TO_V4]),
             Err(ProjectError::MigrationFailure { .. })
         ));
     }

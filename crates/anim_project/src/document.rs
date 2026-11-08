@@ -1,12 +1,14 @@
 //! The authoritative document and its revision (spec 12.3).
 //!
-//! `ProjectDocument` is spec 12.8's struct with its six fields, plus the two sections later
-//! packages needed and 12.8 does not list — `events` per scene from version 2 and the
-//! `simulation` section from version 3. Version 4 adds no field here at all: it is the
-//! version of the records already inside `assets`, which this document embeds, and an
-//! embedded collection that changed shape makes the file that holds it a new file format
-//! whether or not one more member appeared at the top level. The two things it deliberately
-//! does not hold are the
+//! `ProjectDocument` is spec 12.8's struct with its six fields, plus the sections later
+//! packages needed and 12.8 does not list — `events` per scene from version 2, the
+//! `simulation` section from version 3, and `audio_clips` per scene from version 5.
+//! Versions 4 and 5 add no field here at the top level: version 4 is the version of the
+//! records already inside `assets`, which this document embeds, and an embedded collection
+//! that changed shape makes the file that holds it a new file format whether or not one
+//! more member appeared at the top level; version 5's `audio_clips` lives inside each
+//! scene, so the document's own field list is unchanged again. The two things it
+//! deliberately does not hold are the
 //! ones spec 12.8 names as forbidden —
 //! "no editor, renderer, device or undo-stack references" — and the third is a `dirty`
 //! flag: a document that recorded whether it had been saved would need a second writer
@@ -45,13 +47,16 @@ use crate::{ProjectError, Result, Revision};
 /// never listed, carrying the tick rate and the random-stream seed. Version 4 is WP06's, and
 /// it moves because `assets` embeds the record collection (ADR-0005 Decision 11): the records
 /// inside it gained the image colour and alpha claims spec 15.2 names as a prerequisite, and a
-/// document that contains a changed record format has itself changed. All three steps are
-/// real — `migrate::V1_TO_V2`, `migrate::V2_TO_V3` and `migrate::V3_TO_V4` — with a committed
+/// document that contains a changed record format has itself changed. Version 5 is WP08's:
+/// the `audio_clips` section every scene gained so that spec 17.2's authored clip semantics
+/// have a home and 17.9's `compile_plan` can read them through the snapshot (17.4 forbids
+/// `anim_audio` depending on this crate). All four steps are real — `migrate::V1_TO_V2`,
+/// `migrate::V2_TO_V3`, `migrate::V3_TO_V4` and `migrate::V4_TO_V5` — with a committed
 /// fixture per version, which is what the rule above asks for. `DOCUMENT_DOMAIN` stays at
 /// `v1`, and so does `MANIFEST_DOMAIN`: appending a field to an unchanged framing is a data
 /// event, not a byte-layout change, which is the split ADR-0005 Decision 4 draws and both
 /// version 2 and version 3 already established.
-pub const PROJECT_SCHEMA_VERSION: u32 = 4;
+pub const PROJECT_SCHEMA_VERSION: u32 = 5;
 
 /// The authoritative state of one project at one revision.
 ///

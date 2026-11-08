@@ -2391,4 +2391,171 @@ time/identity spine but may share a session plan with WP09 per AGENTS.md — one
 chat still holds. `ResourceRegistry`'s records are now consumed; the seam WP06 left is
 closed.
 
+## 2026-11-08 (WP08)
+
+### #46 — WP08 pre-code rulings: the authored-clip prerequisite, G7 audio self-certification, and the offline/preview split
+
+Three decisions taken from one bundled dialog before any WP08 code, the same way #40/#41
+preceded WP06 and #43 preceded WP07. The discovery that forced them: spec 17.2/17.8 require
+authored audio-clip semantics (timeline range, source offset, loop, gain, fades, mute,
+channel) that **no section of the spec defines** and WP04 never built — `AudioCue`
+(`anim_scene/src/snapshot.rs`) is a point event `(occurrence_id, node, position, asset)`,
+`TrackData` is a property-keyframe track, and even WP16's `ContactMarker.audio_cue` is an
+`EventDefinitionId`. Spec 13.8 lists `audio_cues: Arc<[AudioCue]>` but gives `AudioCue` no
+fields. This is the prerequisite-gap class of #33 (simulation settings) and #40 (image
+claims).
+
+#### Ruling 1 — author the clips into the snapshot (the spec-faithful path)
+
+**Decision.** WP08 authors a new `AudioClip` collection in `anim_project` carrying the clip
+semantics, with `PROJECT_SCHEMA_VERSION` 4→5, a real `migrate::V4_TO_V5`, a committed
+`project_v4.anim.json` fixture and a generated `schemas/project/v5.json` (versioned
+generator, the row-15 rule). `anim_scene`'s evaluator reads the authored clips and produces
+an **extended `AudioCue`** carrying the evaluated semantics in exact time; `SNAPSHOT_DOMAIN`
+moves `anim_engine/snapshot/v1`→`/v2` so the changed reading is visible in the digest (the
+WP04 `EASING_ALGORITHM_VERSION` reasoning). `anim_audio::compile_plan(&SceneSnapshot, …)`
+stays faithful to 17.9.
+
+**Why this and not the alternatives.** Spec 17.4 lets `anim_audio` depend only on
+`anim_core`, `anim_assets` and `anim_scene` — **not `anim_project`** — so the clip data must
+reach `compile_plan` *through the snapshot*; there is no legal authored-data side channel.
+Rejected: (a) keeping the snapshot unchanged and adding an `anim_project` dependency plus an
+extra `compile_plan` parameter (WP06's fifth-param pattern) — it deviates from both 17.4 and
+17.9, and audio clip semantics are genuinely scene-evaluation outputs, not asset metadata
+like WP06's colour/alpha claims, so the snapshot is their correct home; (b) a minimal
+no-authored-semantics reading (one-shot clips from cue position + decoded asset length,
+defaults for gain/fades/loop) — it deletes the behaviour 17.12 explicitly tests (exact
+fades, loops, source offsets, channel conversion).
+
+**The hash concern is smaller than WP06's.** WP04's snapshot tests recompute the digest
+cross-process (`wp04_isolation.rs` computes `expected = snapshot_hash(...)` in-process and
+compares the child's output; `evaluation.rs` compares run-to-run). **No committed test
+asserts a stored 64-hex snapshot constant**, so extending `AudioCue` and bumping the domain
+breaks no golden — both processes simply agree on the new encoding. The domain bump is still
+required so the change is not invisible.
+
+#### Ruling 2 — the G7 audio half is self-certifiable
+
+**Decision.** The offline-audio half of G7 (17.12: "exact counts and pinned-stack PCM
+identity") is machine-checkable — PCM hashes, sample-frame counts, chunk-size invariance and
+the fade/loop/offset/channel-conversion relations — the same class as G1–G4 (#21) and G6
+(#43.2). A passing suite is the certification; WP08 states "G7 audio (offline) passed"
+plainly. **The full G7 stays open until WP09**, whose export verification is the other half
+(8.3: "Offline PCM, frame/sample counts, and export verification pass"; the milestone table
+maps G7 to both WP08 and WP09) — exactly as G2 was joint WP02+WP03. The preview-isolation
+clause of 17.12 (identical offline output with preview enabled/disabled/paused/on different
+devices) is **owed when preview lands**, not claimed here.
+
+#### Ruling 3 — this chat builds the prerequisite + offline core; preview is parked
+
+**Decision.** Scope this session to the authored-data prerequisite and the seven offline
+modules (`time`, `plan`, `decode`, `resample`, `offline`, `mix`, `wav`) plus
+`tests/offline.rs`, validated end to end. The preview half (`preview.rs`, `output.rs`,
+`tests/preview.rs`, the first resolution of `cpal`/`ringbuf`, and a live audio device) is
+**parked for the next chat**, following WP06's slice-and-park precedent. The `preview-audio`
+feature is declared in `anim_audio/Cargo.toml` but the preview modules are not built; offline
+code must not call `cpal`, wall-clock, renderer or editor (17.4/17.6). The deferral and the
+preview contract are recorded in `BUILD_STATE.md` so the next session builds it from disk.
+
+**How to apply:** do not re-open these three. The next chat finishes preview against the
+offline planning types built here, proves the preview-isolation clause, and only then is the
+*whole* G7 audio half closed; WP09 closes the export half. One package per chat still holds —
+WP08 offline is this chat's package, preview is its labelled remainder.
+
+#### Ruling 1 refinement — clips are a full-timeline snapshot field, not the per-frame cue
+
+Reading the evaluator while implementing ruling 1 surfaced a distinction the option text
+glossed. `SceneSnapshot.audio_cues` is **per-frame**: `evaluator.rs` builds it from
+`events.occurrences(frame_rate, containing_frame(position))`, so a snapshot at frame N carries
+only the `EventKind::AudioCue` events firing in frame N (spec 13.10/13.12's "audio cue
+identity", WP16's `ContactMarker.audio_cue`). Spec 17's **timeline clips** (a range, source
+offset, loop, gain, fades, `clip_id: TrackId`) are a different object, and `compile_plan` must
+select every clip intersecting a *multi-frame* output range from one snapshot (17.7/17.9). A
+per-frame cue array cannot serve that. So WP08 adds a separate, position-independent
+`audio_clips: Arc<[AudioClip]>` field to `SceneSnapshot` (appended last), populated from the
+authored `SceneData.audio_clips` collection at every position; the per-frame `audio_cues` is
+left intact for event one-shots. The evaluated clip **is** the authored `anim_project::AudioClip`
+(re-exported through `anim_scene`), because clip evaluation is trivial immutable exposure — no
+per-position computation, unlike `EvaluatedNode`. `AudioClip::encode` is `pub` so the snapshot
+can encode it cross-crate. This is within ruling 1's "author clips → snapshot"; it names the
+snapshot shape precisely.
+
+#### Ruling 4 — rubato is forced to its scalar interpolator for portable bit-exactness
+
+**Decision (operator, 2026-11-08).** The offline resampler uses rubato 5.0.1's
+`ScalarInterpolator` via `Async::new_with_sinc_interpolator`, enabled by the `bench_asyncro`
+feature, rather than the default `Async::new_sinc`. The whole audio path is then bit-exact on
+**every** CPU, not just the reference machine.
+
+**Why.** The pinned-crate research found rubato 5.x dispatches at runtime across AVX+FMA → SSE
+→ scalar interpolators (`asynchro_sinc.rs::make_interpolator`), and FMA's fused rounding differs
+from separate mul+add. Default sinc is bit-identical across fresh processes on one machine (so
+G7's "pinned-stack PCM identity" would pass), but a different CPU could produce different PCM
+bits. symphonia 0.6.1 decode is already portable here — `default-features=false` keeps
+`opt-simd` off, so its DSP is scalar with no dispatch — so forcing rubato scalar makes the
+*entire* decode→resample→mix path portable bit-exact, a clean property for a primary export.
+Offline export is not real-time, so the scalar speed cost is irrelevant. This exceeds the
+spec's pinned-stack minimum deliberately, in the same spirit as ADR-0008's Philox fold and
+WP05's refusal to call `libm` trig. `bench_asyncro` is a benchmark-named feature but is the only
+public path to the scalar interpolator; using it in production is recorded as a dependency
+deviation. **symphonia's `opt-simd` stays OFF** — enabling it would reintroduce rustfft SIMD
+dispatch into vorbis IMDCT.
+
+**How to apply:** the resampler settings (sinc_len, window, cutoff, oversampling,
+interpolation type, chunk size) are locked and versioned in `resample.rs` and keyed into the
+derived-cache `settings_hash` (17.7). A change to them is a `RESAMPLER_ALGORITHM_VERSION` bump,
+not a quiet edit. If a future cross-machine PCM golden disagrees, the scalar path is already
+the portable one — look at the mix accumulator and rounding before blaming the resampler.
+
+### #47 — WP08 offline-core implementation deviations (the seven modules + tests/offline.rs)
+
+The offline core (`time`, `plan`, `decode`, `resample`, `offline`, `mix`, `wav`,
+`tests/offline.rs`) is built against #46's rulings; preview stays parked. Four shape decisions
+surfaced while implementing it, recorded here so a fresh session does not "correct" them back
+toward the spec listing:
+
+1. **`compile_plan` gains a fourth parameter, `fps: FrameRate`** (pure suffix, the WP06
+   fifth-`extract_frame` shape, #41). Spec 17.9 writes three parameters, but a clip's timeline
+   bounds are `FramePos` (project time) and converting them to sample indices needs the project
+   frame rate. Neither `OfflineAudioSpec` (17.8 fixes its five fields) nor `SceneSnapshot`
+   (carries `time`/`position`, not a rate) supplies one, so the caller that owns the document's
+   rate passes it. `sample_range(frames, fps)` keeps 17.9's two-argument signature unchanged.
+
+2. **The canonical resample count is the exact integer `ceil(frames*48000/rate)`, reconciled
+   against rubato's f64 ceiling.** rubato 5.0.1's `process_all` returns
+   `ceil(resample_ratio_f64 * n)` frames; at an exact rational boundary (`n*48000` divisible by
+   `rate`) the rounded f64 ratio can push that one frame above the exact ceiling (measured:
+   147 frames @ 11025 → rubato 641, exact 640). `resample_to_48k` computes the exact count in
+   integer arithmetic and, when rubato emits exactly one extra frame at such a boundary, trims
+   the past-the-end interpolation artifact; any other disagreement is a `ResampleFailure`. The
+   decision is integer arithmetic, so it is portable, and it is part of
+   `RESAMPLER_ALGORITHM_VERSION`. The task recipe's literal "verify `samples.len() == exact*channels`"
+   would otherwise reject legitimate boundary-length sources.
+
+3. **Channel conversion is driven by the decoded `CanonicalPcm::channels`, not the authored
+   `ChannelLayout`.** The authored layout is a closed mono/stereo enum, so both are supported by
+   construction; 17.7's "reject unsupported layouts" is enforced where an unsupported count can
+   actually arrive — `decode.rs` and `mix.rs`, against the decoded count. `anim_scene` re-exports
+   `ChannelLayout` alongside `AudioClip` (a one-line addition to the prerequisite's re-export) so
+   `anim_audio` and its fixtures can name the variants without the 17.4-forbidden `anim_project`
+   edge. `PlannedClip` keeps 17.8's exact field list (no channels field); the mixer reads the PCM.
+
+4. **The finite-gain check in `compile_plan` is defensive, not a reachable producer.** A
+   `Rational` is i128-bounded, so `to_f64` (|num| ≤ ~1.7e38, den ≥ 1) is always finite; 17.7's
+   "finite gains" is guaranteed by the type. The `is_finite` guard documents the rule at the
+   conversion site and refuses a non-finite gain if `Rational` is ever widened. `MalformedClip`
+   has reachable producers (reversed/empty timeline, negative offset/fade); no test claims the
+   gain guard fires, per risk 19's no-vacuous-coverage rule.
+
+**Also settled here:** `AudioError` lives in `lib.rs` (17.3 lists no `error.rs`, the
+`anim_sim`/`anim_assets` precedent); the device-loss/output-stream categories 17.11 names are
+absent because nothing offline produces them (they belong to preview). `MixPlan::new` is public
+with private fields (the `CanonicalPcm` pattern) so a synthetic `PcmAssetSource` can drive the
+mix tests; `mix_range` re-checks the per-clip source invariants (channel count, length match,
+nonzero loop modulus, checked position arithmetic) so a hand-built plan cannot panic. The
+`AssetResolver` cache is a `RefCell<BTreeMap>` (single-threaded, content-keyed, eviction cannot
+change output — `clippy.toml` denies `Mutex`/`RwLock`, not `RefCell`). `decode_source`/
+`resample_to_48k` carry the content hash as the decode-layer identity; the resolver enriches it
+to the logical `AssetId` for operator-facing errors.
+
 

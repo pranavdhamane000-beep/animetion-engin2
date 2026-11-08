@@ -5,7 +5,47 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 17.4: internal dependencies are anim_core, anim_assets and anim_scene; symphonia
+# decodes the enabled source formats, rubato resamples offline, hound writes the canonical
+# WAV, thiserror carries the taxonomy. cpal and ringbuf are declared OPTIONAL and belong to
+# the parked preview half (DECISIONS.md #46 ruling 3): the `preview-audio` feature is off by
+# default and no offline module names them, so 17.4's "offline code MUST NOT call cpal" is a
+# property of the build graph rather than a convention.
+#
+# rubato carries `bench_asyncro` (DECISIONS.md #46 ruling 4): it is the only public path to
+# `ScalarInterpolator` and `Async::new_with_sinc_interpolator`, which force the resampler
+# off runtime AVX/SSE dispatch so the whole decode -> resample -> mix path is bit-exact on
+# every CPU, not just the reference machine. Using a benchmark-named feature in production
+# is a recorded dependency deviation. symphonia's `opt-simd` stays OFF (workspace declares
+# default-features = false), so its DSP is scalar with no dispatch either.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_scene = { path = "../anim_scene" }
+symphonia = { workspace = true }
+rubato = { workspace = true, features = ["bench_asyncro"] }
+hound = { workspace = true }
+thiserror = { workspace = true }
+cpal = { workspace = true, optional = true }
+ringbuf = { workspace = true, optional = true }
+
+[dev-dependencies]
+# tests/offline.rs builds its own snapshots and manifests (public constructors, typed ids
+# derived from the RFC 4122 DNS namespace like every other crate's fixtures), writes real
+# WAVs through hound into a tempdir for the decode/resample round trip, and property-tests
+# chunk-size invariance. serde_json drives the authored-clip fixtures through the same
+# strict Deserialize the document loader uses.
+proptest = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+default = []
+# The preview half (preview.rs, output.rs, tests/preview.rs) is parked for the next chat
+# (DECISIONS.md #46 ruling 3). The feature and its optional deps are declared so the graph
+# is settled, but no preview code exists yet and offline output never depends on it.
+preview-audio = ["dep:cpal", "dep:ringbuf"]
 
 [lints]
 workspace = true

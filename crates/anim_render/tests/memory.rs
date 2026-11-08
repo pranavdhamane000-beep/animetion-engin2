@@ -34,7 +34,7 @@ use anim_render::memory::{MemoryMode, MemoryPolicy, TelemetryStatus};
 use anim_render::readback::OutputReadback;
 use anim_render::{FinalAlpha, RenderConfig, RenderError, VramFloor};
 use anim_scene::{
-    AudioCue, EvaluatedCamera, EvaluatedNode, SceneEvent, SceneSnapshot, SimulationInput,
+    AudioClip, AudioCue, EvaluatedCamera, EvaluatedNode, SceneEvent, SceneSnapshot, SimulationInput,
 };
 use anim_sim::{SimTick, SimulationFrame};
 
@@ -103,6 +103,7 @@ fn snapshot(asset: AssetId) -> SceneSnapshot {
         audio_cues: Arc::from(Vec::<AudioCue>::new().into_boxed_slice()),
         simulation_inputs: Arc::from(Vec::<SimulationInput>::new().into_boxed_slice()),
         events: Arc::from(Vec::<SceneEvent>::new().into_boxed_slice()),
+        audio_clips: Arc::from(Vec::<AudioClip>::new().into_boxed_slice()),
     }
 }
 

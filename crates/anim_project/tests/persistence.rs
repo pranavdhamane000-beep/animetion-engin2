@@ -709,6 +709,35 @@ fn the_committed_schema_matches_what_the_serializers_write() {
             &serde_json::to_value(event).unwrap(),
         );
     }
+    // Version 5's addition, checked the way the curve and event definitions were: the
+    // audio_clip definition describes exactly what AudioClip's serializer writes, and the
+    // channel layout it references is present rather than only narrated.
+    let clip = anim_project::AudioClip::new(
+        TrackId::derive(&namespace(), b"music"),
+        AssetId::derive(&namespace(), b"score"),
+        FramePos::at_frame(2),
+        FramePos::at_frame(10),
+        Rational::from_i128(0),
+        false,
+        Rational::from_i128(1),
+        Rational::from_i128(0),
+        Rational::from_i128(0),
+        false,
+        anim_project::ChannelLayout::Stereo,
+    );
+    check(
+        &schema_document,
+        "audio_clip",
+        &serde_json::to_value(&clip).unwrap(),
+    );
+    assert!(
+        defs.contains_key("channel_layout"),
+        "the schema describes the layout the Rust enum can hold"
+    );
+    assert!(
+        serde_json::to_value(anim_project::ChannelLayout::Mono).unwrap() == "mono",
+        "a unit variant stays a bare name, which is the spelling its canonical tag uses"
+    );
     // The two new definitions the version bump exists for. `check` compares a required
     // list against a serialized object, and an `Easing` is a string or an object
     // depending on the variant, so the easing spelling is asserted directly instead.

@@ -31,7 +31,7 @@ use anim_core::hash::CanonicalBytes;
 use anim_core::id::{AssetId, NodeId, SceneId};
 use anim_core::rational::Rational;
 use anim_core::time::FramePos;
-use anim_project::{ContentHash, EventOccurrenceId, Revision, EASING_ALGORITHM_VERSION};
+use anim_project::{AudioClip, ContentHash, EventOccurrenceId, Revision, EASING_ALGORITHM_VERSION};
 
 use crate::camera::EvaluatedCamera;
 use crate::events::SceneEvent;
@@ -68,6 +68,17 @@ pub struct SceneSnapshot {
     pub simulation_inputs: Arc<[SimulationInput]>,
     /// The canonical event sequence for the frame this position is in, in 13.7's order.
     pub events: Arc<[SceneEvent]>,
+    /// The full-timeline audio clips for WP08's offline mixer (spec 17.9's `compile_plan`
+    /// reads these). Position-independent: every authored clip is present at every
+    /// position, because a clip spans a timeline range rather than firing in one frame.
+    /// This is distinct from `audio_cues`, which is the per-frame event view — a cue is a
+    /// point occurrence, a clip is a range. The evaluated clip *is* the authored clip
+    /// (immutable exposure, no per-position computation), so this carries `anim_project`'s
+    /// `AudioClip` directly; 17.4 lets `anim_audio` depend on this crate and not on
+    /// `anim_project`, so the snapshot is the only legal route the data has to the mixer.
+    /// Appended last so every earlier field keeps its byte offset; `SNAPSHOT_DOMAIN` moves
+    /// v1 -> v2 so the changed reading is visible in the digest (DECISIONS.md #46).
+    pub audio_clips: Arc<[AudioClip]>,
 }
 
 impl SceneSnapshot {
@@ -146,6 +157,15 @@ impl SceneSnapshot {
         );
         for event in self.events.iter() {
             event.encode(cp);
+        }
+        // Last, so every earlier section keeps its offset. `AudioClip::encode` is
+        // infallible (no f64 field), so unlike the sections above it needs no `?`.
+        cp.u64(
+            u64::try_from(self.audio_clips.len())
+                .map_err(|_| count_overflow("audio clip count", &self.scene_id.to_string()))?,
+        );
+        for clip in self.audio_clips.iter() {
+            clip.encode(cp);
         }
         Ok(())
     }
@@ -325,7 +345,8 @@ mod tests {
     )]
 
     use super::*;
-    use anim_project::EventKind;
+    use anim_core::id::TrackId;
+    use anim_project::{ChannelLayout, EventKind};
     use uuid::Uuid;
 
     fn node_id(label: &str) -> NodeId {
@@ -355,6 +376,7 @@ mod tests {
             audio_cues: Arc::new([]),
             simulation_inputs: Arc::new([]),
             events: Arc::new([]),
+            audio_clips: Arc::new([]),
         }
     }
 
@@ -435,5 +457,51 @@ mod tests {
             local_sequence: sequence,
             kind: EventKind::Signal,
         }
+    }
+
+    fn audio_clip(label: &str) -> AudioClip {
+        AudioClip::new(
+            TrackId::derive(&namespace(), label.as_bytes()),
+            AssetId::derive(&namespace(), b"score"),
+            FramePos::at_frame(2),
+            FramePos::at_frame(10),
+            Rational::from_i128(0),
+            false,
+            Rational::from_i128(1),
+            Rational::from_i128(0),
+            Rational::from_i128(0),
+            false,
+            ChannelLayout::Stereo,
+        )
+    }
+
+    #[test]
+    fn two_snapshots_differing_only_in_audio_clips_have_different_bytes_and_hash() {
+        // The WP08 addition must reach the digest: a snapshot with a clip and one without
+        // differ in nothing else, so if the encoder dropped the section the two would hash
+        // alike and a changed mix would be invisible to G3's identity.
+        let empty = snapshot();
+        let mut with_clip = snapshot();
+        let clip = audio_clip("music");
+        with_clip.audio_clips = Arc::new([clip.clone()]);
+        assert_ne!(
+            empty.canonical_bytes().unwrap(),
+            with_clip.canonical_bytes().unwrap()
+        );
+        assert_ne!(
+            snapshot_hash(&empty).unwrap(),
+            snapshot_hash(&with_clip).unwrap()
+        );
+
+        // And the section is encoded faithfully: the stream ends with the u64 count and
+        // then the clip's own canonical bytes, which is the oracle that the snapshot hashes
+        // the authored clip rather than a second rendering of it.
+        let bytes = with_clip.canonical_bytes().unwrap();
+        let mut expected_tail = 1u64.to_le_bytes().to_vec();
+        expected_tail.extend_from_slice(&clip.canonical_bytes());
+        assert!(
+            bytes.ends_with(&expected_tail),
+            "the audio_clips section is the count followed by each clip's canonical bytes"
+        );
     }
 }

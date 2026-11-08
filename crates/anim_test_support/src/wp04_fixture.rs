@@ -205,6 +205,7 @@ pub fn fixture() -> ProjectDocument {
                 0,
             ),
         ],
+        [],
     )
     .expect("the fixture scene is valid");
 

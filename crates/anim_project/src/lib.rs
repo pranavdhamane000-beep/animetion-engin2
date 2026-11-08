@@ -20,7 +20,13 @@
 //! `ProjectDocument.simulation.ticks_per_frame` a WP05 prerequisite, 12.8 does not list a
 //! simulation section, and a tick rate supplied per session instead would let one saved
 //! revision replay to two different states.
+//!
+//! [`audio`] is the tenth, added by WP08 for the same reason again: spec 17.2 makes
+//! authored audio-clip semantics a prerequisite and no section of the spec defines a type
+//! that carries them, so the authored half lives here and `anim_scene` exposes it through
+//! the snapshot (17.4 forbids `anim_audio` depending on this crate). DECISIONS.md #46.
 
+pub mod audio;
 pub mod document;
 pub mod event;
 pub mod migrate;
@@ -41,6 +47,7 @@ pub use anim_core::id::{
 };
 pub use anim_core::time::{FramePos, FrameRate};
 
+pub use audio::{AudioClip, ChannelLayout};
 pub use document::ProjectDocument;
 pub use event::{EventDefinition, EventKind};
 pub use property::{

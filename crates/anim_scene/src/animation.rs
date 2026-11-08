@@ -425,7 +425,7 @@ mod tests {
         // The three engine defaults, each asserted at the value that makes "authored
         // nothing" mean "draw as imported". A `0` for opacity or a `false` for visibility
         // would pass every other test in this crate and produce a black screen in WP06.
-        let scene = SceneData::from_parts("shot01", [node("plain")], [], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [node("plain")], [], [], [], []).unwrap();
         let out = evaluated(&scene, "plain", 5);
         assert!(out.visible, "invisibility is authored, never defaulted");
         assert_eq!(out.opacity, 1.0);
@@ -443,7 +443,7 @@ mod tests {
             PATH_OPACITY,
             PropertyValue::Rational(r(1, 4)),
         );
-        let scene = SceneData::from_parts("shot01", [plain], [], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [plain], [], [], [], []).unwrap();
         assert_eq!(evaluated(&scene, "plain", 1).opacity, 0.25);
     }
 
@@ -455,7 +455,7 @@ mod tests {
             PATH_OPACITY,
             [key(0, 0, 1, Easing::Linear), key(10, 1, 1, Easing::Linear)],
         );
-        let scene = SceneData::from_parts("shot01", [hero], [anim], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [hero], [anim], [], [], []).unwrap();
         assert_eq!(
             evaluated(&scene, "hero", 5).opacity,
             0.5,
@@ -474,7 +474,7 @@ mod tests {
             PropertyPath::new(PATH_OPACITY).unwrap(),
             PropertyCurve::with_default(None),
         );
-        let scene = SceneData::from_parts("shot01", [hero], [empty], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [hero], [empty], [], [], []).unwrap();
         assert_eq!(evaluated(&scene, "hero", 3).opacity, 0.5);
     }
 
@@ -507,7 +507,7 @@ mod tests {
             PATH_TRANSFORM_ROTATION,
             PropertyValue::Rational(r(90, 1)),
         );
-        let scene = SceneData::from_parts("shot01", [hero], [], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [hero], [], [], [], []).unwrap();
         let out = evaluated(&scene, "hero", 0);
         assert!(
             out.world_transform[0][0].abs() < 1e-12,
@@ -535,7 +535,8 @@ mod tests {
             PropertyValue::Rational(r(1, 1)),
         );
         let scene =
-            SceneData::from_parts("shot01", [parent.clone(), child.clone()], [], [], []).unwrap();
+            SceneData::from_parts("shot01", [parent.clone(), child.clone()], [], [], [], [])
+                .unwrap();
         let sources = PropertySources::of(&scene);
         let at = FramePos::at_frame(0);
         let locals = local_matrices(&[parent.clone(), child.clone()], &sources, &at).unwrap();
@@ -793,7 +794,7 @@ mod tests {
     fn blending_one_layer_is_that_layer() {
         // The deferral, asserted rather than described. A later package that adds blending
         // fails this only by changing what it means, which is the point of a named seam.
-        let scene = SceneData::from_parts("shot01", [node("plain")], [], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [node("plain")], [], [], [], []).unwrap();
         let base = evaluated(&scene, "plain", 3);
         assert_eq!(blend_layers(base.clone()), base);
     }
@@ -802,7 +803,7 @@ mod tests {
     fn a_noncanonical_path_asked_for_by_name_is_refused_rather_than_read_as_absent() {
         // The evaluator's own bug class, made unreachable-by-accident: a typo in one of the
         // constants above would otherwise default a field silently.
-        let scene = SceneData::from_parts("shot01", [node("plain")], [], [], []).unwrap();
+        let scene = SceneData::from_parts("shot01", [node("plain")], [], [], [], []).unwrap();
         let node_data = scene.node(&node_id("plain")).unwrap().clone();
         assert!(matches!(
             PropertySources::of(&scene).value(

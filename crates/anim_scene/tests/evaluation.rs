@@ -200,6 +200,7 @@ fn authored_scene() -> SceneData {
                 0,
             ),
         ],
+        [],
     )
     .expect("the fixture scene is valid")
 }

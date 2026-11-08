@@ -58,7 +58,7 @@ use anim_render::graph::{create_renderer, PassKind, PostChainConfig, PostStage};
 use anim_render::readback::OutputReadback;
 use anim_render::{FinalAlpha, RenderConfig, RenderQuality, RenderedScene};
 use anim_scene::{
-    AudioCue, EvaluatedCamera, EvaluatedNode, SceneEvent, SceneSnapshot, SimulationInput,
+    AudioClip, AudioCue, EvaluatedCamera, EvaluatedNode, SceneEvent, SceneSnapshot, SimulationInput,
 };
 use anim_sim::{SimTick, SimulationFrame};
 use glam::{Mat4, Vec3};
@@ -124,6 +124,7 @@ fn snapshot(nodes: Vec<EvaluatedNode>, events: Vec<SceneEvent>) -> SceneSnapshot
         audio_cues: Arc::from(Vec::<AudioCue>::new().into_boxed_slice()),
         simulation_inputs: Arc::from(Vec::<SimulationInput>::new().into_boxed_slice()),
         events: Arc::from(events.into_boxed_slice()),
+        audio_clips: Arc::from(Vec::<AudioClip>::new().into_boxed_slice()),
     }
 }
 

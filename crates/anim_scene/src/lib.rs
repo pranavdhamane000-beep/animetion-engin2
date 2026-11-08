@@ -49,6 +49,12 @@ pub use properties::{
     eased_fraction, frame_count, interval_fraction, sample_property, value_as_f64, with_subject,
 };
 pub use snapshot::{snapshot_hash, AudioCue, EvaluatedNode, SceneSnapshot, SimulationInput};
+// WP08's clip type and its channel-layout vocabulary are authored in `anim_project` and
+// exposed through the snapshot; re-export them here so a consumer of `anim_scene` (and
+// `anim_audio` behind it) names one type. `ChannelLayout` rides along because 17.4 forbids
+// `anim_audio` depending on `anim_project`, yet the mixer and its fixtures must name the
+// layout variants — the snapshot is the only legal route (DECISIONS.md #46 ruling 1).
+pub use anim_project::{AudioClip, ChannelLayout};
 
 /// The domain separator for a snapshot's canonical byte stream (ADR-0004 consequence 5's
 /// registry, the convention `anim_engine/document/v1` and `anim_engine/manifest/v1`
@@ -67,7 +73,14 @@ pub use snapshot::{snapshot_hash, AudioCue, EvaluatedNode, SceneSnapshot, Simula
 /// nothing in the document and everything in the snapshot. Two snapshots that differ must
 /// never share a hash, and an algorithm version inside the pre-image is what makes the
 /// silent case impossible.
-pub const SNAPSHOT_DOMAIN: &str = "anim_engine/snapshot/v1";
+///
+/// The suffix moved v1 -> v2 for WP08 (DECISIONS.md #46): the snapshot gained the
+/// `audio_clips` field, so its byte stream — and therefore every digest over it — changed.
+/// No committed test pins a stored v1 snapshot constant (the WP04 suites recompute the
+/// digest cross-process), so the bump breaks no golden; it is here so the changed reading
+/// is visible in the identity rather than silent, the same reasoning that put
+/// `EASING_ALGORITHM_VERSION` in the pre-image.
+pub const SNAPSHOT_DOMAIN: &str = "anim_engine/snapshot/v2";
 
 /// The package's error taxonomy (spec 13.11).
 ///

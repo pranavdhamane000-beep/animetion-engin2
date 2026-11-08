@@ -500,7 +500,9 @@ mod tests {
     use anim_core::id::SceneId;
     use anim_core::rational::Rational;
     use anim_core::time::FramePos;
-    use anim_scene::{AudioCue, EvaluatedCamera, EvaluatedNode, SceneEvent, SimulationInput};
+    use anim_scene::{
+        AudioClip, AudioCue, EvaluatedCamera, EvaluatedNode, SceneEvent, SimulationInput,
+    };
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -561,6 +563,7 @@ mod tests {
             audio_cues: Arc::from(Vec::<AudioCue>::new().into_boxed_slice()),
             simulation_inputs: Arc::from(Vec::<SimulationInput>::new().into_boxed_slice()),
             events: Arc::from(Vec::<SceneEvent>::new().into_boxed_slice()),
+            audio_clips: Arc::from(Vec::<AudioClip>::new().into_boxed_slice()),
         }
     }
 

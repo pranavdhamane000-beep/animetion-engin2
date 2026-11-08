@@ -24,6 +24,7 @@ use anim_core::id::{EventDefinitionId, NodeId, TrackId};
 use anim_core::time::FramePos;
 use serde::{Deserialize, Serialize};
 
+use crate::audio::AudioClip;
 use crate::event::EventDefinition;
 use crate::property::{PropertyCurve, PropertyKey, PropertyPath, PropertyValue};
 use crate::{ProjectError, Result};
@@ -185,14 +186,16 @@ impl Marker {
     }
 }
 
-/// One scene: a hierarchy, its property tracks, its markers, and its events.
+/// One scene: a hierarchy, its property tracks, its markers, its events and its audio
+/// clips.
 ///
 /// Every collection is a `BTreeMap` keyed by the type's own stable id, so the order a
 /// scene serializes in is a property of the ids rather than of the sequence an operator
 /// worked in — the same reason `nodes` and `tracks` are keyed this way, and the reason
 /// spec 13.7 can name `NodeId` order as the root visit order at all. `markers` is the
 /// exception, and stays one: a marker has no id (spec 10.8 lists no `MarkerId`), so its
-/// order is the `(position, label)` pair it is unique in.
+/// order is the `(position, label)` pair it is unique in. `audio_clips` is keyed by the
+/// clip's `TrackId` (spec 17.8's `PlannedClip.clip_id`), so it joins the id-keyed maps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SceneData {
     /// Non-empty, validated: an unnamed scene cannot be reported on.
@@ -203,6 +206,10 @@ pub struct SceneData {
     /// private (DECISIONS.md #22's reading of spec 10.8's normalization rule).
     markers: Vec<Marker>,
     events: BTreeMap<EventDefinitionId, EventDefinition>,
+    /// WP08's authored audio clips (spec 17.2), keyed by `clip_id`. Private for the same
+    /// reason as the other collections: a clip carries validated invariants, and a
+    /// derived `Deserialize` would fill the map without asking `validate`.
+    audio_clips: BTreeMap<TrackId, AudioClip>,
 }
 
 impl SceneData {
@@ -218,6 +225,7 @@ impl SceneData {
             tracks: BTreeMap::new(),
             markers: Vec::new(),
             events: BTreeMap::new(),
+            audio_clips: BTreeMap::new(),
         };
         scene.check_name()?;
         Ok(scene)
@@ -241,6 +249,7 @@ impl SceneData {
         tracks: impl IntoIterator<Item = TrackData>,
         markers: impl IntoIterator<Item = Marker>,
         events: impl IntoIterator<Item = EventDefinition>,
+        audio_clips: impl IntoIterator<Item = AudioClip>,
     ) -> Result<Self> {
         let mut marker_list: Vec<Marker> = markers.into_iter().collect();
         marker_list.sort();
@@ -253,6 +262,10 @@ impl SceneData {
                 .collect(),
             markers: marker_list,
             events: events.into_iter().map(|event| (event.id, event)).collect(),
+            audio_clips: audio_clips
+                .into_iter()
+                .map(|clip| (clip.clip_id, clip))
+                .collect(),
         };
         scene.validate()?;
         Ok(scene)
@@ -374,6 +387,36 @@ impl SceneData {
         self.change(|scene| scene.events.remove(event_id))
     }
 
+    /// The audio clips, in `clip_id` (`TrackId`) order.
+    ///
+    /// Not in timeline order, and deliberately so: 17.5's plan order is
+    /// `(timeline_start, clip_id)`, which is the mixer's job to compute against the export
+    /// range. Storage order here only has to be canonical, which an id-keyed map gives.
+    pub fn audio_clips(&self) -> impl Iterator<Item = &AudioClip> {
+        self.audio_clips.values()
+    }
+
+    #[must_use]
+    pub fn audio_clip(&self, clip_id: &TrackId) -> Option<&AudioClip> {
+        self.audio_clips.get(clip_id)
+    }
+
+    /// Insert or replace one audio clip, returning what it displaced.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectError::Validation`] if the clip's own invariants fail (an empty or reversed
+    /// timeline range, a negative source offset or fade). Asset existence is not checked
+    /// here: the manifest is document-level, and WP08's `compile_plan` resolves sources.
+    pub fn insert_audio_clip(&mut self, clip: AudioClip) -> Result<Option<AudioClip>> {
+        self.change(|scene| scene.audio_clips.insert(clip.clip_id, clip))
+    }
+
+    /// Remove one audio clip, returning it.
+    pub fn remove_audio_clip(&mut self, clip_id: &TrackId) -> Result<Option<AudioClip>> {
+        self.change(|scene| scene.audio_clips.remove(clip_id))
+    }
+
     /// Insert or replace one node, returning what it displaced.
     ///
     /// # Errors
@@ -472,7 +515,8 @@ impl SceneData {
     /// [`ProjectError::Validation`] naming the first offending object and the rule it
     /// broke: empty name, missing parent, self-parent, a hierarchy cycle, a repeated
     /// sibling order among one parent's children, a track targeting no node, two tracks
-    /// on one property, a repeated marker, an event whose source node is absent.
+    /// on one property, a repeated marker, an event whose source node is absent, an audio
+    /// clip with an empty/reversed timeline range or a negative offset/fade.
     pub fn validate(&self) -> Result<()> {
         self.check_name()?;
 
@@ -551,6 +595,12 @@ impl SceneData {
             if !self.nodes.contains_key(&event.source) {
                 return Err(EventDefinition::missing_source(&event.source));
             }
+        }
+
+        // Each clip's error already names the clip in its location, the way the node and
+        // track loops name theirs; the document's own wrapper adds the scene id on top.
+        for clip in self.audio_clips.values() {
+            clip.validate()?;
         }
         Ok(())
     }
@@ -679,14 +729,21 @@ impl SceneData {
         for marker in &self.markers {
             marker.encode(cp);
         }
-        // Last, so the four sections WP03 wrote keep the offsets they had. This is a
-        // field addition and not a layout change, which is why it moves
+        // After the four sections WP03 wrote, so they keep the offsets they had. This is
+        // a field addition and not a layout change, which is why it moves
         // `PROJECT_SCHEMA_VERSION` and leaves `DOCUMENT_DOMAIN` alone — the framing
         // rules an existing section is written under are untouched (ADR-0005 Decision
         // 4's split, and lib.rs's reading of it).
         cp.u64(self.events.len() as u64);
         for event in self.events.values() {
             event.encode(cp);
+        }
+        // Last, so the five sections before it keep the offsets they had. WP08's audio
+        // clips are the same kind of pure suffix the events section was: a field addition
+        // that moves `PROJECT_SCHEMA_VERSION` (4 -> 5) and leaves `DOCUMENT_DOMAIN` at v1.
+        cp.u64(self.audio_clips.len() as u64);
+        for clip in self.audio_clips.values() {
+            clip.encode(cp);
         }
     }
 
@@ -705,12 +762,13 @@ impl Serialize for SceneData {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("SceneData", 5)?;
+        let mut state = serializer.serialize_struct("SceneData", 6)?;
         state.serialize_field("name", &self.name)?;
         state.serialize_field("nodes", &self.nodes)?;
         state.serialize_field("tracks", &self.tracks)?;
         state.serialize_field("markers", &self.markers)?;
         state.serialize_field("events", &self.events)?;
+        state.serialize_field("audio_clips", &self.audio_clips)?;
         state.end()
     }
 }
@@ -720,11 +778,12 @@ impl<'de> Deserialize<'de> for SceneData {
     /// are private precisely because they hold invariants, and a derived impl would fill
     /// them without asking.
     ///
-    /// `events` has no `serde(default)`, and that is the migration's teeth. A version 1
-    /// file has no such member, so it cannot be read as version 2 — it has to go through
-    /// `migrate::chain()`, which adds the section and says so by writing
-    /// `schema_version: 2`. Defaulting an absent `events` to empty instead would let a
-    /// version 1 file load as a version 2 document, which is the one mistake a schema
+    /// `events` and `audio_clips` have no `serde(default)`, and that is the migration's
+    /// teeth. A version 1 file has no `events` member, so it cannot be read as version 2;
+    /// a version 4 file has no `audio_clips` member, so it cannot be read as version 5.
+    /// Each has to go through `migrate::chain()`, which adds the section and says so by
+    /// writing the new `schema_version`. Defaulting an absent section to empty instead
+    /// would let an old file load as a new document, which is the one mistake a schema
     /// bump exists to make impossible.
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -736,6 +795,7 @@ impl<'de> Deserialize<'de> for SceneData {
             tracks: BTreeMap<TrackId, TrackData>,
             markers: Vec<Marker>,
             events: BTreeMap<EventDefinitionId, EventDefinition>,
+            audio_clips: BTreeMap<TrackId, AudioClip>,
         }
         let raw = RawScene::deserialize(deserializer)?;
         Self::from_parts(
@@ -744,6 +804,7 @@ impl<'de> Deserialize<'de> for SceneData {
             raw.tracks.into_values(),
             raw.markers,
             raw.events.into_values(),
+            raw.audio_clips.into_values(),
         )
         .map_err(serde::de::Error::custom)
     }
@@ -840,7 +901,7 @@ mod tests {
         let parent = node("parent", None, 0);
         let parent_id = parent.node_id;
         let child = node("child", Some("parent"), 0);
-        let built = SceneData::from_parts("shot01", [child, parent], [], [], []);
+        let built = SceneData::from_parts("shot01", [child, parent], [], [], [], []);
         let scene = built.expect("a legal graph loads regardless of arrival order");
         assert_eq!(scene.children_of(&parent_id).len(), 1);
     }
@@ -853,7 +914,7 @@ mod tests {
             NodeData::new(a, Some(b), 0, "a"),
             NodeData::new(b, Some(a), 1, "b"),
         ];
-        let rejected = SceneData::from_parts("shot01", nodes, [], [], []);
+        let rejected = SceneData::from_parts("shot01", nodes, [], [], [], []);
         assert!(
             matches!(rejected, Err(ProjectError::Validation { .. })),
             "a two-node cycle must be refused at load, not livelock the visitor"
@@ -997,5 +1058,75 @@ mod tests {
         b.insert_node(node("x", None, 0)).unwrap();
 
         assert_eq!(a.canonical_bytes(), b.canonical_bytes());
+    }
+
+    fn audio_clip(label: &str) -> AudioClip {
+        AudioClip::new(
+            track_id(label),
+            anim_core::id::AssetId::derive(&namespace(), b"score"),
+            FramePos::at_frame(2),
+            FramePos::at_frame(10),
+            Rational::from_i128(0),
+            false,
+            Rational::from_i128(1),
+            Rational::from_i128(0),
+            Rational::from_i128(0),
+            false,
+            crate::audio::ChannelLayout::Stereo,
+        )
+    }
+
+    #[test]
+    fn a_scene_with_an_audio_clip_round_trips_json_and_bytes() {
+        let mut scene = SceneData::new("shot01").unwrap();
+        scene.insert_node(node("root", None, 0)).unwrap();
+        scene.insert_audio_clip(audio_clip("music")).unwrap();
+        assert_eq!(scene.audio_clips().count(), 1);
+        assert_eq!(
+            scene.audio_clip(&track_id("music")).map(|c| c.clip_id),
+            Some(track_id("music"))
+        );
+
+        let bytes = serde_json::to_vec(&scene).unwrap();
+        let loaded: SceneData = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(loaded, scene);
+        assert_eq!(serde_json::to_vec(&loaded).unwrap(), bytes);
+        assert_eq!(loaded.canonical_bytes(), scene.canonical_bytes());
+
+        // The mutators are clone-and-swap: a replace returns the displaced clip, and a
+        // remove returns it, leaving the scene as it was before the insert.
+        let displaced = scene.insert_audio_clip(audio_clip("music")).unwrap();
+        assert!(displaced.is_some());
+        assert!(scene
+            .remove_audio_clip(&track_id("music"))
+            .unwrap()
+            .is_some());
+        assert_eq!(scene.audio_clips().count(), 0);
+    }
+
+    #[test]
+    fn an_invalid_clip_is_refused_by_the_scene_and_changes_nothing() {
+        let mut scene = SceneData::new("shot01").unwrap();
+        let before = scene.clone();
+        let mut bad = audio_clip("bad");
+        bad.timeline_end = FramePos::at_frame(1); // reversed: start 2, end 1
+        assert!(matches!(
+            scene.insert_audio_clip(bad),
+            Err(ProjectError::Validation { .. })
+        ));
+        assert_eq!(scene, before, "a rejected insert must not touch the scene");
+    }
+
+    #[test]
+    fn a_version_4_shaped_scene_without_audio_clips_refuses_to_load() {
+        // The strictness rule: `audio_clips` has no `serde(default)`, so a scene written
+        // at version 4 — which has the other five members but no `audio_clips` — cannot be
+        // read as version 5. It has to go through `migrate::V4_TO_V5`.
+        let json = r#"{"name":"shot01","nodes":{},"tracks":{},"markers":[],"events":{}}"#;
+        assert!(
+            serde_json::from_str::<SceneData>(json).is_err(),
+            "a v4 scene has no audio_clips member, and a default filled in at parse time \
+             would make the migration optional"
+        );
     }
 }

@@ -179,7 +179,7 @@ mod tests {
                 other => NodeData::new(node_id(other), Some(node_id("root")), 0, other),
             })
             .collect();
-        let mut scene = SceneData::from_parts("shot01", nodes, [], [], []).unwrap();
+        let mut scene = SceneData::from_parts("shot01", nodes, [], [], [], []).unwrap();
         scene
             .insert_track(TrackData::new(
                 track_id("x"),
