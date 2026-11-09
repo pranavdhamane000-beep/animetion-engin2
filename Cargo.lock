@@ -127,6 +127,24 @@ version = "0.0.0"
 [[package]]
 name = "anim_export"
 version = "0.0.0"
+dependencies = [
+ "anim_assets",
+ "anim_audio",
+ "anim_core",
+ "anim_project",
+ "anim_render",
+ "anim_scene",
+ "anim_sim",
+ "blake3",
+ "hound",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+ "wgpu",
+]
 
 [[package]]
 name = "anim_headless"

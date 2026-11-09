@@ -2700,4 +2700,126 @@ the feeder, then the stream field drops (cpal joins its callback thread) — 17.
 is a bounded 1 ms sleep under a reasoned `disallowed_methods` allow, the precedent
 `clippy.toml` itself names for preview.
 
+### #50 — WP09 pre-code rulings (four from one dialog), measured FFmpeg facts, and the deterministic/runtime split
+
+WP09 opened with the four export questions the spec left genuinely open (spec 18.6's alpha
+codec-matrix detail, "full byte-determinism of the container" left by ADR-0014, the unmeasured
+AAC priming, and the valueless `ExportSettings`/`config/export_profiles.json` shapes). They were
+put to the operator as one bundled dialog before any code, exactly as #46/#48 did for WP08. His
+rulings, 2026-11-09:
+
+**Ruling 1 — MP4 only; MOV and PNG-sequence are refused, not attempted.** Spec 18.6 draws three
+delivery rows, but the pinned `tools/ffmpeg/ffmpeg-manifest.json` declares only `libx264`/`aac`/
+`mp4` — `prores_ks`, the `.mov` container and the `yuva444p10le` alpha pix_fmt were **never
+capability-probed** (WP00 probed only an ffv1/Matroska round trip). So `validate` resolves the
+MP4/H.264 row and refuses the other two with `ValidationCheck::CapabilityNotCertified` rather
+than spawn against an unprobed capability (spec 9.11's no-silent-unverified rule). The rows stay
+in the code matrix and the profile file (documenting what the engine intends) with
+`certified: false`; a later probe that actually exercises prores/mov/png flips them on.
+
+**Ruling 2 — determinism is proven at the raw boundary; the container is verified structurally.**
+ADR-0014 fact 5 explicitly deferred "full byte-determinism of the container" to WP09. Chosen: the
+**packed RGBA frames and the offline WAV PCM must hash byte-identical across two runs on the
+pinned stack** (this is the G1–G4 machine-checkable class, and it is what the whole engine's
+determinism spine already guarantees); the **MP4 itself is verified by counts/dimensions/rational
+frame-rate/codec-id/pixel-format/stream-order/priming**, not by requiring the container bytes to
+be identical across runs. This matches spec 18.12's own wording ("compare PCM and frame hashes on
+the pinned stack **before lossy encoding**"). `ExportReport.output_hash` is the blake3 of the
+published file — a content identity for the artifact, not a cross-run determinism claim.
+
+**Ruling 3 — the first synced MP4 carries AAC, and its priming is measured, not assumed.** Spec
+18.6's MP4 audio cell is "AAC or none"; the milestone names "synced audio," and G7's audio half is
+"Offline PCM, frame/sample counts, export verification." So the milestone MP4 muxes native `aac`.
+Because 18.7 requires lossy audio "checked against declared priming/edit-list behavior," and that
+delay was **never measured on this build** (ADR-0014 measured only Vorbis), the priming was
+measured first (below) and encoded as a constant. PCM-in-MP4 (bit-exact but off-matrix) and
+video-only-plus-separate-WAV were the rejected alternatives; the latter would not satisfy "synced
+audio," the former would be a matrix deviation.
+
+**Ruling 4 — the profile schema and the headless CLI are mine to draft for his approval.**
+`config/export_profiles.json` (a `schema_version` + a `profiles[]` list, each naming a codec row
+and one resolved `QualityProfile`) and the `anim_headless` `export` subcommand surface
+(`--profile`, `--frames a:b`, `--dest`, `--overwrite`) were proposed as the concrete values spec
+18.8 leaves blank, and gate-tested by a unit test that loads the *shipped* file so it cannot pass
+the gate while broken.
+
+#### Measured FFmpeg facts (2026-11-09, vendored 9.0.2 essentials) — WP09 verifies against these
+
+1. **The MP4 delivery path is genuinely available** even though the manifest's capability list
+   under-spells it: `ffmpeg -encoders`/`-formats` on the vendored binary show `libx264`, native
+   `aac`, and the `mp4` muxer all present. (The manifest's `capabilities` block lists `ffv1` for
+   the *probe*; delivery codecs are read from the binary at run time before use, per its own
+   `not_verified` clause.)
+2. **Native AAC priming is exactly one frame: `initial_padding=1024` samples** (48 kHz). A 96 000
+   -frame input (`in.wav`, 2 s) encoded to aac-in-mp4 and decoded back to `pcm_s16le` yielded
+   **96 000 frames — a sample-exact round trip** (net delta 0), because FFmpeg's mp4 edit list
+   trims the priming, and the container `format.duration` read back `2.000000` exactly.
+3. **The container's audio frame count is still unreadable** (ADR-0014 f3 confirmed again: a
+   `-count_frames` on the mp4 reported 24, which is block-sets not samples). So the verifier does
+   NOT read an audio `nb_read_frames`; it demuxes the audio stream to `pcm_s16le` and counts the
+   streamed PCM bytes (÷4 for stereo s16), comparing to the offline WAV's expected count within a
+   one-AAC-frame (1024) priming window. This is `verify::AAC_FRAME_PRIMING_SAMPLES`.
+4. **`-fflags +bitexact -map_metadata -1`** strip the `Lavf`/tag fields (ADR-0014 f5), so the two
+   runs whose *raw* hashes Ruling 2 compares are not perturbed by an encoder tag; `+faststart`
+   moves the moov atom to the front so FFprobe reads the finished container without a full scan.
+
+#### What this package landed (deterministic half), and what is parked (runtime half)
+
+`anim_export` was an empty stub; this chat built and gate-certified the **deterministic, no-GPU,
+no-spawn half** of it — 31 unit tests, five-step workspace gate green, no change to any other
+crate:
+
+- `settings.rs` — `ExportSettings`, the immutable 18.6 `CodecSpec` matrix (now carrying both the
+  encoder name `libx264` and the probe-reported stream codec name `h264`, because the verifier
+  compares the latter), `ResolvedExport`, `validate(settings, project)` (project validate, the
+  capability gate, H.264 even-dimension + no-alpha rules, fps-must-equal-project-rate, the
+  stride/area overflow guards, empty-range refusal), `settings_hash`, and the
+  `config/export_profiles.json` parser/`ExportProfiles`.
+- `manifest.rs` — `JobManifest`: `project_hash` (schema+project_id+revision), `asset_manifest_hash`
+  (`manifest_digest`), `settings_hash`, and an `ExportEnvironment` block kept **separate** from the
+  deterministic hash (18.8). `deterministic_hash()` excludes the environment by construction.
+- `progress.rs` — `ProgressSink`/`Stage`/`Progress` and a lock-free `CancellationToken`.
+- `ffmpeg.rs` — manifest `schema_version:1` parse, streaming **SHA-256** `verify_executable`
+  (digest then size, before spawn, no PATH fallback), `FfmpegTools::open`, the pure versioned
+  argument arrays (`encode_args` rawvideo/rgba/pipe:0 → libx264/yuv420p + resolved colour +
+  `+bitexact`/no-metadata/`+faststart`; `mux_args` copy-video + declared aac, **no `-shortest`**;
+  `ffprobe_args`, `audio_demux_args`), and the shell-free child lifecycle (`StreamingChild`
+  streaming encoder stdin with bounded stdout/stderr drain threads; `run_capture`;
+  `run_counting_stdout` counting audio bytes without buffering the track; deadline kill+reap).
+- `verify.rs` — `ExpectedCounts`/`ExpectedAudio`, `expected_from(resolved, wav_frames)`,
+  `verify_output` (ffprobe parse → `check_streams`: video first, codec/pix_fmt/dims/`r_frame_rate`,
+  `nb_read_frames`==N with **absence a failure not a zero** per ADR-0014 f1; then PCM audio count
+  within the priming window; then `check_timeline_duration` vs the container). The pure checks are
+  unit-tested against hand-written ffprobe JSON (an oracle independent of the code under test).
+- `publish.rs` — `assert_destination_available` (the pre-render "existing destination without
+  overwrite fails before rendering" check, 18.5) and `promote`/`publish`: stream the FFmpeg temp
+  through `StagedWriter` on the destination volume computing blake3 in the same pass (**hash-compare,
+  not byte-compare**, BUILD_STATE risk 9), then atomic same-volume rename via the shared
+  `atomic_replace` (`CrossVolume`/`DestinationExists` are the module's, enforced once for the repo).
+- `lib.rs` — the 18.11 typed `ExportError` taxonomy (validation/asset/simulation/gpu/memory/encoder/
+  mux/verification/io/disk-full/cancellation/publication/tool-integrity, broken-pipe carrying
+  FFmpeg status + stderr tail), `ExportReport`, and the simple `ExportJob` shape.
+
+**Parked for the next chat (the GPU↔FFmpeg runtime loop — this needs a live RTX 3050A and
+iterative bring-up, the WP06/WP07 class of work that carries its own session):**
+`readback.rs` (the fixed 3-slot ring + `SlotState` {Free→Submitted→Mapped→Ready→Free} + row
+unpadding + backpressure, wiring `Renderer::read_output_tracked` and preflight budgeting per the
+WP07 handoff "pins export resources with `set_locked` and budgets readback through preflight"),
+`pipeline.rs` (the 18.5 stage orchestration: verify `referenced_objects`+`resolve_with(Content)`,
+`prepare_export`, render offline WAV + check count, drive `StreamingChild` per frame, mux), the
+`lib.rs` `execute`/`run` entry points, `anim_headless/src/cli.rs` + the `export` subcommand + the
+stable exit-code map, and `tests/export.rs` (the end-to-end tiny MP4 golden, the repeat-run raw-
+hash determinism clause Ruling 2, and the 18.12 fault matrix: missing/mismatched FFmpeg, encoder
+failure, broken pipe, short readback, device loss, cancellation, rename failure). **G7's export
+half and the S2 "first deterministic MP4" exit are therefore OPEN** until that half lands; the
+`anim_export` doc comment names exactly which 18.9 surface still awaits so no one reads the crate
+as complete. Integration signatures the runtime half compiles against are in the session's
+research; the durable ones are already cross-referenced in the WP06–WP08 handoff notes above.
+
+**How to apply:** do not re-open the four rulings. When the runtime half lands, `verify_output`'s
+priming window and `expected_from` are the audio contract; keep the environment block out of every
+deterministic hash; and when MOV/PNG are eventually certified, the change is a capability probe +
+flipping `certified` + extending `audio_codec_name`/parity handling — not a re-do of `validate`.
+
+
 

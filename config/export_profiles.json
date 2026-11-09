@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Versioned immutable codec/quality profiles (spec 18.3). The CLI (anim_headless) and the",
+    "WP10 editor select a profile by name; `anim_export::settings::validate` then checks the",
+    "selection against the project and the 18.6 codec matrix and folds these fixed values into",
+    "the settings_hash. Only the MP4/H.264 rows are certified on this pinned FFmpeg (WP09",
+    "ruling, DECISIONS #50): the mov_prores4444 and png_sequence entries are defined so the",
+    "file matches the full 18.6 matrix, but validate refuses them with CapabilityNotCertified",
+    "because prores_ks / the .mov container / the alpha pix_fmt were never capability-probed.",
+    "Values below for those rows are therefore descriptive, not exercised."
+  ],
+  "profiles": [
+    {
+      "name": "mp4-h264-draft",
+      "codec": "mp4_h264",
+      "quality": {
+        "rate": "crf",
+        "crf": 28,
+        "preset": "veryfast",
+        "gop_frames": 48,
+        "codec_profile": "high",
+        "codec_level": "4.1",
+        "color": { "primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "tv" },
+        "audio": { "bitrate_kbps": 128, "sample_rate": 48000 }
+      }
+    },
+    {
+      "name": "mp4-h264-standard",
+      "codec": "mp4_h264",
+      "quality": {
+        "rate": "crf",
+        "crf": 20,
+        "preset": "medium",
+        "gop_frames": 48,
+        "codec_profile": "high",
+        "codec_level": "4.1",
+        "color": { "primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "tv" },
+        "audio": { "bitrate_kbps": 192, "sample_rate": 48000 }
+      }
+    },
+    {
+      "name": "mp4-h264-master",
+      "codec": "mp4_h264",
+      "quality": {
+        "rate": "crf",
+        "crf": 12,
+        "preset": "slow",
+        "gop_frames": 48,
+        "codec_profile": "high",
+        "codec_level": "4.2",
+        "color": { "primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "tv" },
+        "audio": { "bitrate_kbps": 320, "sample_rate": 48000 }
+      }
+    },
+    {
+      "name": "mov-prores4444",
+      "codec": "mov_prores4444",
+      "quality": {
+        "rate": "crf",
+        "crf": 0,
+        "preset": "0",
+        "gop_frames": 1,
+        "codec_profile": "4444",
+        "codec_level": null,
+        "color": { "primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "pc" },
+        "audio": { "bitrate_kbps": 0, "sample_rate": 48000 }
+      }
+    },
+    {
+      "name": "png-sequence",
+      "codec": "png_sequence",
+      "quality": {
+        "rate": "crf",
+        "crf": 0,
+        "preset": "medium",
+        "gop_frames": 1,
+        "codec_profile": "",
+        "codec_level": null,
+        "color": { "primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "pc" },
+        "audio": { "bitrate_kbps": 0, "sample_rate": 48000 }
+      }
+    }
+  ]
+}

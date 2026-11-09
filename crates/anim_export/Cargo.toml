@@ -5,7 +5,51 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Spec 18.4 lists the dependency set: "required core/project/asset/scene/simulation/render/
+# audio crates, serde, thiserror, blake3 and shared atomic replacement." The atomic
+# replacement is `anim_core::io::atomic_replace`, so `anim_core` carries it and no separate
+# edge is needed. Three additions beyond the 18.4 sentence, each a fact rather than taste:
+#
+#   `wgpu` — `readback.rs` names `wgpu::Buffer`/`Extent3d` in the spec's own `ReadbackSlot`
+#   and `ReadbackRing` (18.8). The GPU types are part of the exported shape, not hidden.
+#
+#   `serde_json` — the immutable profile file (18.3 `config/export_profiles.json`), the job
+#   manifest (18.3 `manifest.rs`) and the `ffprobe -print_format json` verifier output
+#   (ADR-0014 fact 4: streams addressed by index) are all JSON. `serde` (18.4) derives the
+#   structs; `serde_json` reads and writes them.
+#
+#   `sha2` + `hound` — FFmpeg/FFprobe are verified by SHA-256 against
+#   `tools/ffmpeg/ffmpeg-manifest.json` before spawn (spec 5.1, ADR-0014; `blake3` is the
+#   internal content hash, SHA-256 is the operator-reproducible executable digest), and the
+#   audio verifier counts decoded PCM frames via a WAV read (ADR-0014 fact 3: container audio
+#   counts are wrong, so verification demuxes to PCM and counts there). Both crates are
+#   already in the workspace lock and in the 5.1 baseline; neither is a new package.
+#
+# What 18.4 actually PROHIBITS — "Preview/editor crates are prohibited dependencies" — holds:
+# `anim_editor` and the `preview-audio` half of `anim_audio` appear nowhere here. `anim_audio`
+# is depended on for its offline surface (`compile_plan`/`render_offline`/`write_wav`) only,
+# and the default build compiles no `cpal` (WP08 §17.4), so export stays a build-graph
+# cpal-free path exactly as the offline gate run is.
 [dependencies]
+anim_core = { path = "../anim_core" }
+anim_assets = { path = "../anim_assets" }
+anim_project = { path = "../anim_project" }
+anim_scene = { path = "../anim_scene" }
+anim_sim = { path = "../anim_sim" }
+anim_render = { path = "../anim_render" }
+anim_audio = { path = "../anim_audio" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+wgpu = { workspace = true }
+hound = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true
