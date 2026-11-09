@@ -21,7 +21,8 @@
     Also run the five WP00 platform probes, including the paths that must FAIL.
 
 .PARAMETER Only
-    Run a single named step. Accepted values: fmt, clippy, test, probes.
+    Run a single named step. Accepted values: fmt, clippy, test, preview-clippy,
+    preview-test, probes.
 
 .EXAMPLE
     tools\ci.cmd                      # code gate
@@ -31,7 +32,7 @@
 [CmdletBinding()]
 param(
     [switch]$WithProbes,
-    [ValidateSet('fmt', 'clippy', 'test', 'probes')]
+    [ValidateSet('fmt', 'clippy', 'test', 'preview-clippy', 'preview-test', 'probes')]
     [string]$Only = ''
 )
 
@@ -124,9 +125,12 @@ function Invoke-Cargo {
 }
 
 # ---------------------------------------------------------------------------
-# The three code gates from DECISIONS.md "Test command".
+# The code gates from DECISIONS.md "Test command", plus the preview-feature gates
+# (DECISIONS.md #48 ruling 4). The default workspace build compiles no cpal at all;
+# the preview steps run anim_audio with `preview-audio` so 17.12's device matrix and
+# the live WASAPI smoke are inside the gate, not beside it.
 # ---------------------------------------------------------------------------
-$Wanted = if ($Only) { @($Only) } else { @('fmt', 'clippy', 'test') }
+$Wanted = if ($Only) { @($Only) } else { @('fmt', 'clippy', 'test', 'preview-clippy', 'preview-test') }
 if ($WithProbes -and -not $Only) { $Wanted += 'probes' }
 
 if ($Wanted -contains 'fmt') {
@@ -151,6 +155,18 @@ if ($Wanted -contains 'test') {
     # graph nobody validated. Spec 5.1 makes Cargo.lock authoritative after WP00.
     $null = Invoke-Step -Name 'test' -Arguments 'cargo test --workspace --locked' -Body {
         Invoke-Cargo @('test', '--workspace', '--locked')
+    }
+}
+
+if ($Wanted -contains 'preview-clippy') {
+    $null = Invoke-Step -Name 'preview-clippy' -Arguments 'cargo clippy -p anim_audio --all-targets --features preview-audio -- -D warnings' -Body {
+        Invoke-Cargo @('clippy', '-p', 'anim_audio', '--all-targets', '--features', 'preview-audio', '--', '-D', 'warnings')
+    }
+}
+
+if ($Wanted -contains 'preview-test') {
+    $null = Invoke-Step -Name 'preview-test' -Arguments 'cargo test -p anim_audio --features preview-audio --locked' -Body {
+        Invoke-Cargo @('test', '-p', 'anim_audio', '--features', 'preview-audio', '--locked')
     }
 }
 

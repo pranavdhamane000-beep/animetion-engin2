@@ -7,10 +7,15 @@ publish.workspace = true
 
 # Spec 17.4: internal dependencies are anim_core, anim_assets and anim_scene; symphonia
 # decodes the enabled source formats, rubato resamples offline, hound writes the canonical
-# WAV, thiserror carries the taxonomy. cpal and ringbuf are declared OPTIONAL and belong to
-# the parked preview half (DECISIONS.md #46 ruling 3): the `preview-audio` feature is off by
+# WAV, thiserror carries the taxonomy. cpal and ringbuf are OPTIONAL and belong to the
+# preview half (DECISIONS.md #46 ruling 3, #48): the `preview-audio` feature is off by
 # default and no offline module names them, so 17.4's "offline code MUST NOT call cpal" is a
 # property of the build graph rather than a convention.
+#
+# cpal carries its `custom` feature (DECISIONS.md #48 ruling 4): a zero-dependency feature
+# (`custom = []` in cpal 0.18.2) that lets tests inject deterministic fake devices into the
+# real `cpal::Device` enum via `CustomDevice::from_device`. It is the test vehicle for
+# 17.12's pause/seek/underrun/restart/teardown matrix; production opens WASAPI devices.
 #
 # rubato carries `bench_asyncro` (DECISIONS.md #46 ruling 4): it is the only public path to
 # `ScalarInterpolator` and `Async::new_with_sinc_interpolator`, which force the resampler
@@ -26,7 +31,7 @@ symphonia = { workspace = true }
 rubato = { workspace = true, features = ["bench_asyncro"] }
 hound = { workspace = true }
 thiserror = { workspace = true }
-cpal = { workspace = true, optional = true }
+cpal = { workspace = true, optional = true, features = ["custom"] }
 ringbuf = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -42,9 +47,9 @@ uuid = { workspace = true }
 
 [features]
 default = []
-# The preview half (preview.rs, output.rs, tests/preview.rs) is parked for the next chat
-# (DECISIONS.md #46 ruling 3). The feature and its optional deps are declared so the graph
-# is settled, but no preview code exists yet and offline output never depends on it.
+# The preview half (preview.rs, output.rs, tests/preview.rs), built under DECISIONS.md #48.
+# Off by default: the offline gate run compiles no cpal at all, and the gate's preview steps
+# run this feature explicitly. Offline output never depends on it (spec 17.4/17.12).
 preview-audio = ["dep:cpal", "dep:ringbuf"]
 
 [lints]

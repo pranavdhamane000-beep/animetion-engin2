@@ -21,15 +21,17 @@
 //! Spec 17.4 lets this crate depend on `anim_core`, `anim_assets` and `anim_scene` only.
 //! The authored clip reaches it through `SceneSnapshot.audio_clips` (DECISIONS.md #46
 //! ruling 1), re-exported as [`AudioClip`] / [`ChannelLayout`] from `anim_scene`. The
-//! preview half (`preview.rs`, `output.rs`, cpal/ringbuf) is **parked** (ruling 3): the
-//! `preview-audio` feature is declared but no offline module names a device, a clock, the
-//! renderer or the editor.
+//! preview half ([`preview`], [`output`], cpal/ringbuf) is built under the `preview-audio`
+//! feature (DECISIONS.md #48): it owns a separate transport driven by the audio callback
+//! clock, shares the immutable planning types above and no mutable offline state, and the
+//! default (feature-off) build compiles no cpal at all — 17.4's "offline code MUST NOT call
+//! cpal" stays a property of the build graph.
 //!
 //! The error taxonomy lives here rather than in an `error.rs` because 17.3 lists no such
 //! file — the resolution `anim_assets` reached for `AssetError` (DECISIONS.md #29) and
-//! `anim_sim`/`anim_scene` for theirs. Every variant has an offline producer; the
-//! device-loss and output-stream categories 17.11 also names belong to preview and are
-//! deliberately absent (risk 19: no unreachable variant left to look covered).
+//! `anim_sim`/`anim_scene` for theirs. Every variant has a producer in the default build
+//! except the two device categories 17.11 names, which are `preview-audio`-gated so an
+//! offline-only build carries no unreachable variant (risk 19).
 
 pub mod decode;
 pub mod mix;
@@ -38,6 +40,11 @@ pub mod plan;
 pub mod resample;
 pub mod time;
 pub mod wav;
+
+#[cfg(feature = "preview-audio")]
+pub mod output;
+#[cfg(feature = "preview-audio")]
+pub mod preview;
 
 pub use decode::{decode_source, NativePcm};
 pub use mix::mix_range;
@@ -49,6 +56,17 @@ pub use plan::{
 pub use resample::{resample_to_48k, resampler_settings_hash};
 pub use time::{sample_range, SampleOffset, SampleRange};
 pub use wav::write_wav;
+
+#[cfg(feature = "preview-audio")]
+pub use output::PreviewOutput;
+#[cfg(feature = "preview-audio")]
+pub use preview::{PreviewClock, PreviewClockSnapshot};
+
+// The preview half's device vocabulary, re-exported so the editor and the preview tests
+// name one cpal version (DECISIONS.md #48 ruling 4). Gated with the feature so the
+// feature-off gate run compiles no cpal, keeping 17.4's build-graph proof intact.
+#[cfg(feature = "preview-audio")]
+pub use cpal;
 
 // The clip vocabulary is authored in `anim_project` and exposed through `anim_scene`; name
 // it here so a consumer of this crate reads one type (17.4 forbids the anim_project edge).
@@ -100,7 +118,8 @@ pub const PCM_DOMAIN: &str = "anim_engine/audio_pcm/v1";
 /// second spelling of it.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum AudioError {
-    /// A sample rate or frame rate that is not the canonical export rate, or is zero.
+    /// A sample rate or frame rate that is not the canonical export rate, or is zero; under
+    /// `preview-audio`, also a playback rate that is not finite and positive.
     #[error("invalid audio rate {rate}")]
     InvalidRate { rate: String },
 
@@ -169,6 +188,19 @@ pub enum AudioError {
     /// offline path aborts before publication, so no partial WAV is presented as complete.
     #[error("audio output failed: {detail}")]
     OutputFailure { detail: String },
+
+    /// The preview output device was lost or never existed (spec 17.11). Preview stops
+    /// audio, increments the clock generation and leaves editing available; recovery is an
+    /// explicit reopen. Gated: nothing in the offline build produces it.
+    #[cfg(feature = "preview-audio")]
+    #[error("audio device lost: {detail}")]
+    DeviceLoss { detail: String },
+
+    /// The preview output stream could not be built, started or fed (spec 17.11's
+    /// output-stream failure). Gated: nothing in the offline build produces it.
+    #[cfg(feature = "preview-audio")]
+    #[error("audio output stream failed: {detail}")]
+    OutputStreamFailure { detail: String },
 
     /// An asset-layer fault that is genuinely `anim_assets`' to report (an IO error, an
     /// incompatible decode configuration), preserved rather than re-spelled.

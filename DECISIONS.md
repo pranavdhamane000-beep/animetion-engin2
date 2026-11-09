@@ -2558,4 +2558,146 @@ change output — `clippy.toml` denies `Mutex`/`RwLock`, not `RefCell`). `decode
 `resample_to_48k` carry the content hash as the decode-layer identity; the resolver enriches it
 to the logical `AssetId` for operator-facing errors.
 
+### #48 — WP08 preview pre-code rulings: device choice, scrub rate, feeder thread, test vehicle
+
+Four decisions taken from one bundled dialog before any preview code, the same way #46
+preceded the offline core. The spec fixes the snapshot fields (17.8), the transport
+signatures (17.9), the callback rules (17.6) and the generation events (17.6/17.7), but
+leaves the four questions below open. Operator rulings, 2026-11-08:
+
+#### Ruling 1 — caller-chosen device with a default helper
+
+**Decision.** `PreviewOutput::open(device, …)` takes any `cpal::Device` — the editor owns
+selection (17.10) — and `open_default(...)` is a convenience over the host's default output
+device. Device loss stops audio, increments generation and leaves editing available
+(17.11); recovery is an explicit reopen, which drops and replaces the stream and ring
+(17.8). No automatic rebuild on a new default device: 17.11 says *stop*, not *follow*.
+
+#### Ruling 2 — silent scrub at rate != 1.0
+
+**Decision.** The clock position advances at the commanded `rate`, but audio is silent
+whenever `rate != 1.0`; returning to 1.0 re-anchors at the current position and resumes.
+`set_rate` refuses non-finite or non-positive rates (`InvalidRate`). No varispeed DSP: the
+preview mixer stays byte-identical to the offline mixer, and 17.6's rate-change generation
+bump still fires. Rejected: varispeed (a second speed-conversion algorithm with its own
+drift and tests) and rate-locked-to-1.0 (makes the spec's rate field and rate-change rule
+unreachable).
+
+#### Ruling 3 — dedicated feeder thread, 1,024-frame blocks, 8,192-frame ring
+
+**Decision.** `open` spawns one named feeder thread that mixes 1,024-frame blocks (the
+`DEFAULT_CHUNK_SAMPLES` size) into a preallocated 8,192-frame (~171 ms at 48 kHz) lock-free
+SPSC ring (`ringbuf::HeapRb<i16>`), and is signalled and joined on drop. A stalled editor
+loop cannot starve the audio. `clippy.toml` already anticipates bounded sleep loops in
+preview; the feeder's idle wait is one. Rejected: a caller-driven `fill()` pump (simpler
+ownership, but every editor stall longer than the ring depth is an underrun).
+
+#### Ruling 4 — cpal `custom` fake host for the matrix, one live WASAPI smoke in the gate
+
+**Decision.** `anim_audio` enables cpal's `custom` feature (zero extra dependencies,
+`custom = []` in cpal 0.18.2) under `preview-audio`. `tests/preview.rs` drives deterministic
+fake devices — injected into the real `cpal::Device` enum via `CustomDevice::from_device` —
+through 17.12's full matrix: pause, seek, underrun, device restart, callback teardown, two
+different devices, and the identical-offline-output clause. One live smoke test opens this
+machine's default WASAPI device inside the gate. The gate gains `preview-clippy` and
+`preview-test` steps (`-p anim_audio --features preview-audio`); the default workspace
+build still compiles no cpal at all, so 17.4's "offline code MUST NOT call cpal" remains a
+build-graph property. Tests reach cpal through a feature-gated `pub use cpal;` re-export
+rather than an unconditional dev-dependency, which would compile cpal into the
+feature-off gate run and weaken that proof.
+
+**How to apply:** do not re-open these four. Implementation shape (clock seqlock, flush
+protocol, underrun promotion, borrowing mixer) is recorded in #49 once built.
+
+### #49 — WP08 preview implementation deviations (preview.rs, output.rs, tests/preview.rs)
+
+The preview half is built against #48's rulings; the offline modules are untouched. Nine
+shape decisions surfaced while implementing it, recorded so a fresh session does not
+"correct" them back toward a first reading of the spec:
+
+1. **`PreviewClockSnapshot.device_samples` is the elapsed counter *within the current
+   generation*** (global device counter minus the generation's base), not the global
+   counter. 17.8 fixes the six fields and 17.7 says position derives from the counter
+   "within one generation"; with a per-generation elapsed count the snapshot is
+   self-contained — `position = anchor + device_samples * rate` while playing, `anchor`
+   while paused — with no seventh field for the base. Every transport event rebases. The
+   global counter still exists internally and is what the callback increments (17.6).
+
+2. **The clock is a seqlock over atomics, and the callback never enters it.** `clippy.toml`
+   denies `Mutex`/`RwLock`; writers (the transport owner applying editor commands, the
+   feeder promoting underrun/device-error reports) enter with a CAS on the sequence word,
+   readers retry until it is stable. The callback's only writes are `fetch_add`/`store` on
+   counters (device samples, underrun epochs, error epochs, the generation ack), so it
+   stays allocation-free, lock-free and bounded (17.6). `snapshot()` is never called from
+   the callback — its retry loop is unbounded.
+
+3. **Ring invalidation is a clear-and-ack handshake, not a bare clear.** The first
+   implementation cleared the ring on every generation change in the callback; the tests
+   caught it wiping data the feeder had *already pushed for the new generation*, producing
+   silence plus a spurious underrun generation after every event. Now the callback clears
+   and acknowledges the generation, and the feeder pushes only for an acknowledged
+   generation. A second gate (`pushed_generation`) keeps the silence between an ack and the
+   feeder's first push from being reported as an underrun — it is startup latency.
+   **Residual, accepted and bounded:** a block whose generation check passed microseconds
+   before a transport bump can land just after the clear, giving at most one block
+   (~21 ms) of old-position audio; the generation bump still reaches video immediately,
+   which is what 17.6 requires. Closing that window fully would need per-block generation
+   tags in the ring.
+
+4. **Underrun is edge-triggered per episode and the timeline keeps advancing.** The
+   callback reports one epoch per dry episode (callback-local flag, reset by a full buffer
+   or a generation change); the feeder promotes each epoch to a generation bump with
+   `discontinuity = true`, re-anchoring at the current position so the position value is
+   preserved and the elapsed count stays small. Consumed silence counts as device samples:
+   an underrun is an audio gap, not a timeline freeze (17.7 says "marks discontinuity", not
+   "freezes").
+
+5. **The preview mixer borrows; it does not clone.** `mix_range` clones each active asset's
+   whole `CanonicalPcm` per call — unaffordable per 1,024-frame block in a real-time feeder
+   (a three-minute asset is ~69 MB per clone). `mix_preview_block` (17.5's "preview-only
+   mixer") borrows preloaded PCM and otherwise mirrors `mix.rs` sample-for-sample; a
+   proptest proves byte-identity over random plans/ranges. `FULL_SCALE` is duplicated
+   because `mix.rs`'s constant is private and the offline modules stay untouched; the
+   identity test guards the pairing. Sources are preloaded and invariant-checked at
+   `open` (`PreloadedSources`), because `AssetResolver` is `RefCell`-based and `!Sync`.
+
+6. **The stream requests canonical 48 kHz stereo `i16`, relying on WASAPI
+   `AUTOCONVERTPCM`.** cpal 0.18.2's WASAPI backend sets `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`
+   on output streams, so the audio engine accepts the canonical format regardless of the
+   device mix format — no preview resampler and no second quantization (i16 is exactly the
+   offline rounding). A device with no 48 kHz stereo I16 output configuration is an
+   `OutputStreamFailure`, never a silent substitute. Channel count is the one thing
+   shared-mode WASAPI does not convert (cpal's own comment), so stereo support is checked.
+
+7. **`AudioError` gains `DeviceLoss` and `OutputStreamFailure`, both
+   `#[cfg(feature = "preview-audio")]`.** #47 recorded them as absent because nothing
+   offline produces them; preview now does, and the gate keeps the offline-only build free
+   of unreachable variants (risk 19). A `failed` flag inside the seqlock refuses
+   `set_playing(true)` after a device error until an explicit reopen; `device_error()`
+   reports the cpal kind. Any cpal error stops audio (17.11 literally), including `Xrun`.
+
+8. **The gate gains `preview-clippy` and `preview-test` steps** (`-p anim_audio --features
+   preview-audio`). The default workspace build still compiles no cpal at all — 17.4's
+   build-graph proof — and `tests/preview.rs` is `#![cfg(feature = "preview-audio")]`.
+   Tests reach cpal through a feature-gated `pub use cpal;` re-export, not an unconditional
+   dev-dependency (which would compile cpal into the feature-off gate run).
+
+9. **cpal 0.18.2 API facts for later packages** (verified against the registry source, not
+   recalled): one unified `Error`/`ErrorKind` replaces the old per-operation error enums;
+   `build_output_stream` takes a fourth `timeout: Option<Duration>` parameter; `DeviceId`
+   (`host:id`) is stable and serializable; the `custom` feature (`custom = []`, zero deps)
+   injects fake hosts/devices/streams into the real platform enums via
+   `CustomDevice::from_device(...).into()`; `OutputCallbackInfo::new` is public, so a fake
+   device can drive typed callbacks deterministically; streams are returned paused and
+   `Stream::drop` stops the callback thread. The preview transport starts **paused** while
+   the cpal stream runs from `open` (silence while paused keeps the counter honest).
+
+**Also settled here:** `PreviewOutput::open(device, plan, sources)` preloads before
+touching the device, so missing/changed sources fail before any stream exists (17.7);
+`open_default` is the convenience over the host default (#48.1). Drop signals and joins
+the feeder, then the stream field drops (cpal joins its callback thread) — 17.7's
+"callback data after stream destruction is ignored by ownership". The feeder's idle wait
+is a bounded 1 ms sleep under a reasoned `disallowed_methods` allow, the precedent
+`clippy.toml` itself names for preview.
+
 
